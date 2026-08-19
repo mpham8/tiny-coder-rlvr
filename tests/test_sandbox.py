@@ -1,4 +1,5 @@
 import os
+import signal
 import sys
 import time
 import unittest
@@ -6,27 +7,28 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tiny_coder_rlvr.sandbox.runner import Runner
-from tiny_coder_rlvr.sandbox.sandbox import Candidate
+from datasets import load_dataset
+
+from tiny_coder_rlvr.sandbox.sandbox import Candidate, running, start
+
+
+#wait until child finished
+def wait_child(pid: int, timeout: float = 10.0) -> int:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        child_pid, status = os.waitpid(pid, os.WNOHANG)
+        if child_pid == pid:
+            return status
+        time.sleep(0.05)
+
+    os.killpg(pid, signal.SIGKILL)
+    _, status = os.waitpid(pid, 0)
+    return status
 
 
 def exited_successfully(status: int) -> bool:
+    #check child exit normal, check exit code sucess
     return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
-
-
-def grade(candidate: Candidate, timeout: float = 10.0) -> int:
-    runner = Runner()
-    runner.start()
-    try:
-        runner.submit(candidate)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            for _, status in runner.poll_results():
-                return status
-            time.sleep(0.05)
-        raise TimeoutError(f"timed out waiting for {candidate.id}")
-    finally:
-        runner.stop()
 
 
 class SandboxTest(unittest.TestCase):
@@ -34,17 +36,21 @@ class SandboxTest(unittest.TestCase):
         candidate = Candidate(
             id="add",
             imports="",
-            code="def add(a, b):\n    return a + b\n",
-            tests="def check(entry_point):\n    assert entry_point(1, 2) == 3\n",
+            code=(
+                "def add(a, b):\n"
+                "    return a + b\n"
+            ),
+            tests=(
+                "def check(entry_point):\n"
+                "    assert entry_point(1, 2) == 3\n"
+            ),
             entry_point="add",
         )
 
-        status = grade(candidate)
+        status = wait_child(start(candidate))
         self.assertTrue(exited_successfully(status))
 
     def test_leetcode_sample(self):
-        from datasets import load_dataset
-
         sample = load_dataset("newfacade/LeetCodeDataset", split="train")[0]
         candidate = Candidate(
             id="leetcode-0",
@@ -54,8 +60,26 @@ class SandboxTest(unittest.TestCase):
             entry_point=sample["entry_point"],
         )
 
-        status = grade(candidate, timeout=30)
+        status = wait_child(start(candidate), timeout=30)
         self.assertTrue(exited_successfully(status))
+
+    def test_mem_limit(self):
+        candidate = Candidate(
+            id="memory-hog",
+            imports="",
+            code=(
+                "def eat_memory():\n"
+                "    bytearray(1024 ** 3)\n"
+            ),
+            tests=(
+                "def check(entry_point):\n"
+                "    entry_point()\n"
+            ),
+            entry_point="eat_memory",
+        )
+
+        status = wait_child(start(candidate), timeout=10)
+        self.assertFalse(exited_successfully(status))
 
 
 if __name__ == "__main__":

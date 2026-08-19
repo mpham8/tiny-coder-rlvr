@@ -1,11 +1,13 @@
 from dataclasses import dataclass
 import os
 import signal
-import subprocess
 import sys
 import time
 import collections
 import tempfile
+
+from tiny_coder_rlvr.sandbox.process_limits import RECURSION_LIMIT, apply_limits
+
 
 MAX_CONCURRENT = 16
 
@@ -32,8 +34,10 @@ class RunningJob:
 def start(candidate):
     max_wallclock_time = 10
 
+    #write source to a temp file
     full_source = (
-        candidate.imports
+        f"import sys; sys.setrecursionlimit({RECURSION_LIMIT})\n"
+        + candidate.imports
         + candidate.code
         + candidate.tests
         + f"\ncheck({candidate.entry_point})\n"
@@ -43,15 +47,36 @@ def start(candidate):
     tmp.close()
     candidate_path = tmp.name
 
-    proc = subprocess.Popen(
-        [sys.executable, candidate_path],
-        env=os.environ.copy(),  # TODO: change later for true isolation
-    )
-    running[proc.pid] = RunningJob(
-        candidate=candidate,
-        wallclock_limit=time.time() + max_wallclock_time,
-    )
-    return proc.pid
+    pid = os.fork()
+
+    #in child process
+    if pid == 0:
+        os.setsid() #make candidate its own session leader
+        
+        apply_limits()
+        
+        safe_env = {
+            "PATH": "/usr/bin:/bin",
+            "PYTHONHASHSEED": "0",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1", 
+            "LANG": "C.UTF-8",
+        }
+
+        #execute the python
+        os.execve(
+            sys.executable,
+            [sys.executable, candidate_path],
+            safe_env,  
+        )
+        os._exit(127)
+
+    #in parent process
+    if pid > 0:
+        running[pid] = RunningJob(candidate=candidate, wallclock_limit=time.time() + max_wallclock_time)
+        return pid
+
+    raise OSError("fork failed")
 
 
 def sweep_once():
@@ -64,19 +89,27 @@ def sweep_once():
         child_pid, status = os.waitpid(pid, os.WNOHANG)
 
         if child_pid == pid:
+            #add pid to results
             candidate_id = running[pid].candidate.id
+            
+            #remove pid from running
             running.pop(pid, None)
             results[candidate_id] = status
             finished.append((candidate_id, status))
-            break
+            
+            continue
 
         if time.time() > running[pid].wallclock_limit:
+            #kill process
             os.kill(pid, signal.SIGKILL)
             _, status = os.waitpid(pid, 0)
+            
+            #remove pid from running
             job = running.pop(pid, None)
             results[job.candidate.id] = status
             finished.append((job.candidate.id, status))
-            break
+            
+            continue
 
     return finished
 
