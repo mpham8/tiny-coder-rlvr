@@ -100,8 +100,7 @@ def sweep_once():
             continue
 
         if time.time() > running[pid].wallclock_limit:
-            #kill process
-            os.kill(pid, signal.SIGKILL)
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
             _, status = os.waitpid(pid, 0)
             
             #remove pid from running
