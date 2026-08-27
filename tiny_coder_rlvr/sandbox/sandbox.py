@@ -47,7 +47,7 @@ def _child_setup() -> None:
 
 def _assert_worker_process() -> None:
     if os.environ.get("TINY_CODER_SANDBOX_WORKER") != "1":
-        raise RuntimeError("sandbox.start() must run inside the sandbox worker process; submit candidates through Runner or DockerRunner")
+        raise RuntimeError("sandbox.start() must run inside the sandbox worker process; submit candidates through DockerRunner")
 
 
 def start(candidate):
@@ -116,8 +116,8 @@ def sweep_once():
 
     return finished
 
-
 def sweep():
     while True:
         sweep_once()
         time.sleep(0.5)
+

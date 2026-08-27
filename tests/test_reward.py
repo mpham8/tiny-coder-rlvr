@@ -5,8 +5,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from data.prepare_data import LeetCodeRLVRDataset, LeetCodeSample, load_leetcode_dataset
+from tests.sandbox_helpers import docker_image_exists
 from tiny_coder_rlvr.reward import FORMAT_FAIL_REWARD, FAIL_REWARD, GradedRollout, L_CACHE, L_MAX, PASS_REWARD, compute_reward_batch, extract_code, make_candidate, overlong_penalty, reward_from_status, response_token_count
-from tiny_coder_rlvr.sandbox.runner import Runner
+from tiny_coder_rlvr.sandbox.runner import create_sandbox_runner
 
 
 def compute_reward_single(completion: str, sample: LeetCodeSample, *, token_ids: list[int] | None = None) -> GradedRollout:
@@ -15,8 +16,7 @@ def compute_reward_single(completion: str, sample: LeetCodeSample, *, token_ids:
         penalty = overlong_penalty(tokens)
         return GradedRollout(reward=FORMAT_FAIL_REWARD + penalty, response_tokens=tokens, base_reward=FORMAT_FAIL_REWARD, overlong_penalty=penalty)
 
-    runner = Runner()
-    runner.start()
+    runner = create_sandbox_runner()
     try:
         graded = compute_reward_batch(runner, [completion], sample, completion_token_counts=[tokens])
         return graded[0]
@@ -52,7 +52,6 @@ class RewardStatusTest(unittest.TestCase):
     def test_reward_from_failure_status(self):
         self.assertEqual(reward_from_status(256), FAIL_REWARD)
 
-
     def test_response_token_count_uses_tokenizer(self):
         self.assertEqual(response_token_count("abc", token_ids=[1, 2, 3]), 3)
 
@@ -74,6 +73,7 @@ class OverlongPenaltyTest(unittest.TestCase):
         self.assertEqual(overlong_penalty(L_MAX + 1), -1.0)
 
 
+@unittest.skipUnless(docker_image_exists(), "sandbox image not built")
 class RewardSyncTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -101,6 +101,7 @@ class RewardSyncTest(unittest.TestCase):
         self.assertEqual(graded.reward, FORMAT_FAIL_REWARD - 1.0)
 
 
+@unittest.skipUnless(docker_image_exists(), "sandbox image not built")
 class RewardAsyncTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -121,8 +122,7 @@ class RewardAsyncTest(unittest.TestCase):
             bad_code,
         ]
 
-        runner = Runner()
-        runner.start()
+        runner = create_sandbox_runner()
         try:
             graded = compute_reward_batch(runner, completions, self.sample, completion_token_counts=[100, 5, 42])
         finally:

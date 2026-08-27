@@ -1,5 +1,4 @@
 import json
-import multiprocessing
 import os
 import queue
 import subprocess
@@ -10,25 +9,7 @@ import time
 from tiny_coder_rlvr.sandbox.sandbox import Candidate, candidates_queue, running, sweep_once
 
 DEFAULT_DOCKER_IMAGE = "tiny-coder-sandbox"
-
-
-def run_runner(job_queue, result_queue):
-    """Lean runner process: no vLLM/datasets, drives sandbox.sweep_once()."""
-    os.environ["TINY_CODER_SANDBOX_WORKER"] = "1"
-    while True:
-        try:
-            while True:
-                candidate = job_queue.get_nowait()
-                if candidate is None:
-                    return
-                candidates_queue.append(candidate)
-        except queue.Empty:
-            pass
-
-        for candidate_id, status in sweep_once():
-            result_queue.put((candidate_id, status))
-
-        time.sleep(0.05)
+SANDBOX_IMAGE = DEFAULT_DOCKER_IMAGE
 
 
 def _candidate_from_message(message: dict) -> Candidate:
@@ -36,54 +17,11 @@ def _candidate_from_message(message: dict) -> Candidate:
 
 
 def _candidate_to_message(candidate: Candidate) -> dict:
-    return {
-        "type": "submit",
-        "id": candidate.id,
-        "imports": candidate.imports,
-        "code": candidate.code,
-        "tests": candidate.tests,
-        "entry_point": candidate.entry_point,
-    }
-
-
-class Runner:
-    def __init__(self):
-        self._ctx = multiprocessing.get_context("spawn")
-        self._jobs = self._ctx.Queue()
-        self._results = self._ctx.Queue()
-        self._proc = None
-
-    def start(self):
-        if self._proc is not None and self._proc.is_alive():
-            return
-        self._proc = self._ctx.Process(target=run_runner, args=(self._jobs, self._results), daemon=True)
-        self._proc.start()
-
-    def submit(self, candidate: Candidate):
-        self._jobs.put(candidate)
-
-    def poll_results(self):
-        out = []
-        while True:
-            try:
-                out.append(self._results.get_nowait())
-            except queue.Empty:
-                break
-        return out
-
-    def stop(self, timeout=10.0):
-        if self._proc is None:
-            return
-        self._jobs.put(None)
-        self._proc.join(timeout=timeout)
-        if self._proc.is_alive():
-            self._proc.terminate()
-            self._proc.join()
-        self._proc = None
+    return {"type": "submit", "id": candidate.id, "imports": candidate.imports, "code": candidate.code, "tests": candidate.tests, "entry_point": candidate.entry_point}
 
 
 class DockerRunner:
-    """Host client for model 2: long-lived sandbox worker in Docker."""
+    """Production sandbox client: long-lived worker in an isolated Docker container."""
 
     def __init__(self, image: str = DEFAULT_DOCKER_IMAGE, docker_bin: str = "docker"):
         self._image = image
@@ -96,15 +34,7 @@ class DockerRunner:
         if self._proc is not None and self._proc.poll() is None:
             return
         self._proc = subprocess.Popen(
-            [
-                self._docker_bin,
-                "run",
-                "-i",
-                "--rm",
-                "--network",
-                "none",
-                self._image,
-            ],
+            [self._docker_bin, "run", "-i", "--rm", "--network", "none", self._image],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
@@ -153,6 +83,12 @@ class DockerRunner:
         self._proc = None
 
 
+def create_sandbox_runner(image: str = DEFAULT_DOCKER_IMAGE, docker_bin: str = "docker") -> DockerRunner:
+    runner = DockerRunner(image=image, docker_bin=docker_bin)
+    runner.start()
+    return runner
+
+
 def _stdin_reader(job_queue: queue.Queue):
     for line in sys.stdin:
         line = line.strip()
@@ -170,7 +106,7 @@ def _stdin_reader(job_queue: queue.Queue):
 
 
 def run_runner_stdio():
-    """Long-lived worker for Docker: JSON lines on stdin, results on stdout."""
+    """Container entrypoint: JSON lines on stdin, results on stdout."""
     os.environ["TINY_CODER_SANDBOX_WORKER"] = "1"
     job_queue = queue.Queue()
     threading.Thread(target=_stdin_reader, args=(job_queue,), daemon=True).start()
