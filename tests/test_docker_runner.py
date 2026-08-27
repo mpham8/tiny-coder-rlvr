@@ -43,15 +43,7 @@ class DockerRunnerTest(unittest.TestCase):
         runner = DockerRunner()
         runner.start()
         try:
-            runner.submit(
-                Candidate(
-                    id="add",
-                    imports="",
-                    code="def add(a, b):\n    return a + b\n",
-                    tests="def check(entry_point):\n    assert entry_point(1, 2) == 3\n",
-                    entry_point="add",
-                )
-            )
+            runner.submit(Candidate(id="add", imports="", code="def add(a, b):\n    return a + b\n", tests="def check(entry_point):\n    assert entry_point(1, 2) == 3\n", entry_point="add"))
             status = wait_for_result(runner, "add")
             self.assertTrue(exited_successfully(status))
         finally:

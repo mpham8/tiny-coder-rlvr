@@ -1,5 +1,4 @@
 import os
-import signal
 import sys
 import time
 import unittest
@@ -9,26 +8,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from datasets import load_dataset
 
-from tiny_coder_rlvr.sandbox.sandbox import Candidate, running, start
-
-
-#wait until child finished
-def wait_child(pid: int, timeout: float = 10.0) -> int:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        child_pid, status = os.waitpid(pid, os.WNOHANG)
-        if child_pid == pid:
-            return status
-        time.sleep(0.05)
-
-    os.killpg(pid, signal.SIGKILL)
-    _, status = os.waitpid(pid, 0)
-    return status
+from tiny_coder_rlvr.sandbox.runner import Runner
+from tiny_coder_rlvr.sandbox.sandbox import Candidate
 
 
 def exited_successfully(status: int) -> bool:
-    #check child exit normal, check exit code sucess
     return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+
+
+def wait_for_result(runner: Runner, candidate_id: str, timeout: float = 30.0) -> int:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for result_id, status in runner.poll_results():
+            if result_id == candidate_id:
+                return status
+        time.sleep(0.05)
+    raise TimeoutError(f"no result for {candidate_id!r}")
 
 
 class SandboxTest(unittest.TestCase):
@@ -47,7 +42,14 @@ class SandboxTest(unittest.TestCase):
             entry_point="add",
         )
 
-        status = wait_child(start(candidate))
+        runner = Runner()
+        runner.start()
+        try:
+            runner.submit(candidate)
+            status = wait_for_result(runner, candidate.id)
+        finally:
+            runner.stop()
+
         self.assertTrue(exited_successfully(status))
 
     def test_leetcode_sample(self):
@@ -60,7 +62,14 @@ class SandboxTest(unittest.TestCase):
             entry_point=sample["entry_point"],
         )
 
-        status = wait_child(start(candidate), timeout=30)
+        runner = Runner()
+        runner.start()
+        try:
+            runner.submit(candidate)
+            status = wait_for_result(runner, candidate.id, timeout=30.0)
+        finally:
+            runner.stop()
+
         self.assertTrue(exited_successfully(status))
 
     def test_mem_limit(self):
@@ -78,7 +87,14 @@ class SandboxTest(unittest.TestCase):
             entry_point="eat_memory",
         )
 
-        status = wait_child(start(candidate), timeout=10)
+        runner = Runner()
+        runner.start()
+        try:
+            runner.submit(candidate)
+            status = wait_for_result(runner, candidate.id, timeout=10.0)
+        finally:
+            runner.stop()
+
         self.assertFalse(exited_successfully(status))
 
 

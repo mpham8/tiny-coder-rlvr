@@ -1,5 +1,6 @@
 import json
 import multiprocessing
+import os
 import queue
 import subprocess
 import sys
@@ -13,6 +14,7 @@ DEFAULT_DOCKER_IMAGE = "tiny-coder-sandbox"
 
 def run_runner(job_queue, result_queue):
     """Lean runner process: no vLLM/datasets, drives sandbox.sweep_once()."""
+    os.environ["TINY_CODER_SANDBOX_WORKER"] = "1"
     while True:
         try:
             while True:
@@ -30,13 +32,7 @@ def run_runner(job_queue, result_queue):
 
 
 def _candidate_from_message(message: dict) -> Candidate:
-    return Candidate(
-        id=message["id"],
-        imports=message.get("imports", ""),
-        code=message["code"],
-        tests=message["tests"],
-        entry_point=message["entry_point"],
-    )
+    return Candidate(id=message["id"], imports=message.get("imports", ""), code=message["code"], tests=message["tests"], entry_point=message["entry_point"])
 
 
 def _candidate_to_message(candidate: Candidate) -> dict:
@@ -60,11 +56,7 @@ class Runner:
     def start(self):
         if self._proc is not None and self._proc.is_alive():
             return
-        self._proc = self._ctx.Process(
-            target=run_runner,
-            args=(self._jobs, self._results),
-            daemon=True,
-        )
+        self._proc = self._ctx.Process(target=run_runner, args=(self._jobs, self._results), daemon=True)
         self._proc.start()
 
     def submit(self, candidate: Candidate):
@@ -179,6 +171,7 @@ def _stdin_reader(job_queue: queue.Queue):
 
 def run_runner_stdio():
     """Long-lived worker for Docker: JSON lines on stdin, results on stdout."""
+    os.environ["TINY_CODER_SANDBOX_WORKER"] = "1"
     job_queue = queue.Queue()
     threading.Thread(target=_stdin_reader, args=(job_queue,), daemon=True).start()
 
@@ -195,10 +188,7 @@ def run_runner_stdio():
             pass
 
         for candidate_id, status in sweep_once():
-            print(
-                json.dumps({"type": "result", "id": candidate_id, "status": status}),
-                flush=True,
-            )
+            print(json.dumps({"type": "result", "id": candidate_id, "status": status}), flush=True)
 
         if shutting_down and not candidates_queue and not running:
             return

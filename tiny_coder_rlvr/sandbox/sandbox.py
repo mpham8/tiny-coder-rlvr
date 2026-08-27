@@ -1,10 +1,11 @@
 from dataclasses import dataclass
+import collections
 import os
 import signal
+import subprocess
 import sys
-import time
-import collections
 import tempfile
+import time
 
 from tiny_coder_rlvr.sandbox.process_limits import RECURSION_LIMIT, apply_limits
 
@@ -29,54 +30,61 @@ class Candidate:
 class RunningJob:
     candidate: Candidate
     wallclock_limit: float
+    proc: subprocess.Popen[bytes]
+
+
+def returncode_to_wait_status(returncode: int) -> int:
+    if returncode < 0:
+        return -returncode
+    if returncode == 0:
+        return 0
+    return returncode << 8
+
+
+def _child_setup() -> None:
+    apply_limits()
+
+
+def _assert_worker_process() -> None:
+    if os.environ.get("TINY_CODER_SANDBOX_WORKER") != "1":
+        raise RuntimeError("sandbox.start() must run inside the sandbox worker process; submit candidates through Runner or DockerRunner")
 
 
 def start(candidate):
+    _assert_worker_process()
     max_wallclock_time = 10
 
-    #write source to a temp file
     full_source = (
         f"import sys; sys.setrecursionlimit({RECURSION_LIMIT})\n"
-        + candidate.imports
-        + candidate.code
-        + candidate.tests
-        + f"\ncheck({candidate.entry_point})\n"
+        f"{candidate.imports}\n"
+        f"{candidate.code}\n"
+        f"{candidate.tests}\n"
+        f"check({candidate.entry_point})\n"
     )
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False)
     tmp.write(full_source)
     tmp.close()
     candidate_path = tmp.name
 
-    pid = os.fork()
+    safe_env = {
+        "PATH": "/usr/bin:/bin",
+        "PYTHONHASHSEED": "0",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "LANG": "C.UTF-8",
+    }
 
-    #in child process
-    if pid == 0:
-        os.setsid() #make candidate its own session leader
-        
-        apply_limits()
-        
-        safe_env = {
-            "PATH": "/usr/bin:/bin",
-            "PYTHONHASHSEED": "0",
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONNOUSERSITE": "1", 
-            "LANG": "C.UTF-8",
-        }
+    proc = subprocess.Popen(
+        [sys.executable, candidate_path],
+        env=safe_env,
+        start_new_session=True,
+        preexec_fn=_child_setup,
+        stdout=subprocess.DEVNULL,
+        stderr=None,
+    )
 
-        #execute the python
-        os.execve(
-            sys.executable,
-            [sys.executable, candidate_path],
-            safe_env,  
-        )
-        os._exit(127)
-
-    #in parent process
-    if pid > 0:
-        running[pid] = RunningJob(candidate=candidate, wallclock_limit=time.time() + max_wallclock_time)
-        return pid
-
-    raise OSError("fork failed")
+    running[proc.pid] = RunningJob(candidate=candidate, wallclock_limit=time.time() + max_wallclock_time, proc=proc)
+    return proc.pid
 
 
 def sweep_once():
@@ -86,28 +94,24 @@ def sweep_once():
         start(candidates_queue.popleft())
 
     for pid in list(running.keys()):
-        child_pid, status = os.waitpid(pid, os.WNOHANG)
+        job = running[pid]
+        returncode = job.proc.poll()
 
-        if child_pid == pid:
-            #add pid to results
-            candidate_id = running[pid].candidate.id
-            
-            #remove pid from running
+        if returncode is not None:
+            candidate_id = job.candidate.id
             running.pop(pid, None)
+            status = returncode_to_wait_status(returncode)
             results[candidate_id] = status
             finished.append((candidate_id, status))
-            
             continue
 
-        if time.time() > running[pid].wallclock_limit:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-            _, status = os.waitpid(pid, 0)
-            
-            #remove pid from running
+        if time.time() > job.wallclock_limit:
+            os.killpg(os.getpgid(job.proc.pid), signal.SIGKILL)
+            job.proc.wait()
             job = running.pop(pid, None)
+            status = returncode_to_wait_status(job.proc.returncode)
             results[job.candidate.id] = status
             finished.append((job.candidate.id, status))
-            
             continue
 
     return finished
