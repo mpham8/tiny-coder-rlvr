@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from datasets import load_dataset
 
 from tests.sandbox_helpers import docker_image_exists, exited_successfully, wait_for_result
-from tiny_coder_rlvr.sandbox.runner import create_sandbox_runner
+from tiny_coder_rlvr.sandbox.runner import create_sandbox_runner_pool
 from tiny_coder_rlvr.sandbox.sandbox import Candidate
 
 
@@ -28,7 +28,7 @@ class SandboxTest(unittest.TestCase):
             entry_point="add",
         )
 
-        runner = create_sandbox_runner()
+        runner = create_sandbox_runner_pool(1)
         try:
             runner.submit(candidate)
             status = wait_for_result(runner, candidate.id)
@@ -47,7 +47,7 @@ class SandboxTest(unittest.TestCase):
             entry_point=sample["entry_point"],
         )
 
-        runner = create_sandbox_runner()
+        runner = create_sandbox_runner_pool(1)
         try:
             runner.submit(candidate)
             status = wait_for_result(runner, candidate.id, timeout=30.0)
@@ -71,7 +71,7 @@ class SandboxTest(unittest.TestCase):
             entry_point="eat_memory",
         )
 
-        runner = create_sandbox_runner()
+        runner = create_sandbox_runner_pool(1)
         try:
             runner.submit(candidate)
             status = wait_for_result(runner, candidate.id, timeout=10.0)

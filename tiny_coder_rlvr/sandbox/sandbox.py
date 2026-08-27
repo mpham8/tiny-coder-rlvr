@@ -14,7 +14,6 @@ MAX_CONCURRENT = 16
 
 candidates_queue = collections.deque()
 running = {}
-results = {}
 
 
 @dataclass
@@ -47,7 +46,7 @@ def _child_setup() -> None:
 
 def _assert_worker_process() -> None:
     if os.environ.get("TINY_CODER_SANDBOX_WORKER") != "1":
-        raise RuntimeError("sandbox.start() must run inside the sandbox worker process; submit candidates through DockerRunner")
+        raise RuntimeError("sandbox.start() must run inside the sandbox worker process")
 
 
 def start(candidate):
@@ -101,7 +100,6 @@ def sweep_once():
             candidate_id = job.candidate.id
             running.pop(pid, None)
             status = returncode_to_wait_status(returncode)
-            results[candidate_id] = status
             finished.append((candidate_id, status))
             continue
 
@@ -110,14 +108,8 @@ def sweep_once():
             job.proc.wait()
             job = running.pop(pid, None)
             status = returncode_to_wait_status(job.proc.returncode)
-            results[job.candidate.id] = status
             finished.append((job.candidate.id, status))
             continue
 
     return finished
-
-def sweep():
-    while True:
-        sweep_once()
-        time.sleep(0.5)
 

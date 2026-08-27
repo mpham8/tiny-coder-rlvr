@@ -9,7 +9,6 @@ import time
 from tiny_coder_rlvr.sandbox.sandbox import Candidate, candidates_queue, running, sweep_once
 
 DEFAULT_DOCKER_IMAGE = "tiny-coder-sandbox"
-SANDBOX_IMAGE = DEFAULT_DOCKER_IMAGE
 
 
 def _candidate_from_message(message: dict) -> Candidate:
@@ -83,10 +82,43 @@ class DockerRunner:
         self._proc = None
 
 
-def create_sandbox_runner(image: str = DEFAULT_DOCKER_IMAGE, docker_bin: str = "docker") -> DockerRunner:
+def _create_sandbox_runner(image: str = DEFAULT_DOCKER_IMAGE, docker_bin: str = "docker") -> DockerRunner:
     runner = DockerRunner(image=image, docker_bin=docker_bin)
     runner.start()
     return runner
+
+
+class DockerRunnerPool:
+    """Spread candidates across N Docker containers using least in-flight load."""
+
+    def __init__(self, runners: list[DockerRunner]):
+        if not runners:
+            raise ValueError("runners must not be empty")
+        self._runners = runners
+        self._in_flight = [0] * len(runners)
+
+    def submit(self, candidate: Candidate):
+        index = min(range(len(self._runners)), key=lambda i: self._in_flight[i])
+        self._runners[index].submit(candidate)
+        self._in_flight[index] += 1
+
+    def poll_results(self):
+        out = []
+        for index, runner in enumerate(self._runners):
+            for candidate_id, status in runner.poll_results():
+                self._in_flight[index] -= 1
+                out.append((candidate_id, status))
+        return out
+
+    def stop(self, timeout: float = 30.0):
+        for runner in self._runners:
+            runner.stop(timeout=timeout)
+
+
+def create_sandbox_runner_pool(n: int, *, image: str = DEFAULT_DOCKER_IMAGE, docker_bin: str = "docker") -> DockerRunnerPool:
+    if n < 1:
+        raise ValueError("n must be at least 1")
+    return DockerRunnerPool([_create_sandbox_runner(image=image, docker_bin=docker_bin) for _ in range(n)])
 
 
 def _stdin_reader(job_queue: queue.Queue):

@@ -3,7 +3,14 @@ import shutil
 import subprocess
 import time
 
-from tiny_coder_rlvr.sandbox.runner import DEFAULT_DOCKER_IMAGE, DockerRunner
+from typing import Protocol
+
+from tiny_coder_rlvr.sandbox.runner import DEFAULT_DOCKER_IMAGE
+
+
+class _PollableRunner(Protocol):
+    def poll_results(self) -> list[tuple[str, int]]: ...
+
 
 SANDBOX_IMAGE = DEFAULT_DOCKER_IMAGE
 
@@ -19,7 +26,7 @@ def exited_successfully(status: int) -> bool:
     return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
 
 
-def wait_for_result(runner: DockerRunner, candidate_id: str, timeout: float = 30.0) -> int:
+def wait_for_result(runner: _PollableRunner, candidate_id: str, timeout: float = 30.0) -> int:
     deadline = time.time() + timeout
     while time.time() < deadline:
         for result_id, status in runner.poll_results():

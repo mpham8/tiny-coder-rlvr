@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.prepare_data import LeetCodeRLVRDataset, LeetCodeSample, load_leetcode_dataset
 from tests.sandbox_helpers import docker_image_exists
 from tiny_coder_rlvr.reward import FORMAT_FAIL_REWARD, FAIL_REWARD, GradedRollout, L_CACHE, L_MAX, PASS_REWARD, compute_reward_batch, extract_code, make_candidate, overlong_penalty, reward_from_status, response_token_count
-from tiny_coder_rlvr.sandbox.runner import create_sandbox_runner
+from tiny_coder_rlvr.sandbox.runner import create_sandbox_runner_pool
 
 
 def compute_reward_single(completion: str, sample: LeetCodeSample, *, token_ids: list[int] | None = None) -> GradedRollout:
@@ -16,7 +16,7 @@ def compute_reward_single(completion: str, sample: LeetCodeSample, *, token_ids:
         penalty = overlong_penalty(tokens)
         return GradedRollout(reward=FORMAT_FAIL_REWARD + penalty, response_tokens=tokens, base_reward=FORMAT_FAIL_REWARD, overlong_penalty=penalty)
 
-    runner = create_sandbox_runner()
+    runner = create_sandbox_runner_pool(1)
     try:
         graded = compute_reward_batch(runner, [completion], sample, completion_token_counts=[tokens])
         return graded[0]
@@ -122,7 +122,7 @@ class RewardAsyncTest(unittest.TestCase):
             bad_code,
         ]
 
-        runner = create_sandbox_runner()
+        runner = create_sandbox_runner_pool(1)
         try:
             graded = compute_reward_batch(runner, completions, self.sample, completion_token_counts=[100, 5, 42])
         finally:
