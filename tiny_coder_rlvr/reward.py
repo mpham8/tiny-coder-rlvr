@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from data.prepare_data import LeetCodeSample
-from tiny_coder_rlvr.sandbox.runner import Runner
 from tiny_coder_rlvr.sandbox.sandbox import Candidate
 
 THINK_END = "</think>"
@@ -58,6 +57,9 @@ def _default_tokenizer():
 
 
 def response_token_count(completion: str, *, token_ids: list[int] | None = None, tokenizer: Any | None = None) -> int:
+    """
+    gets token length
+    """
     if token_ids is not None:
         return len(token_ids)
     tok = tokenizer if tokenizer is not None else _default_tokenizer()
@@ -65,6 +67,9 @@ def response_token_count(completion: str, *, token_ids: list[int] | None = None,
 
 
 def extract_code(completion: str) -> str | None:
+    """
+    uses fences to extract python code from response
+    """
     text = completion.strip()
     if THINK_END in text:
         text = text.split(THINK_END, 1)[1].strip()
@@ -77,6 +82,9 @@ def extract_code(completion: str) -> str | None:
 
 
 def make_candidate(completion: str, sample: LeetCodeSample, *, rollout_id: str) -> Candidate | None:
+    """
+    creates candidate object
+    """
     code = extract_code(completion)
     if not code:
         return None
@@ -86,12 +94,18 @@ def make_candidate(completion: str, sample: LeetCodeSample, *, rollout_id: str) 
 
 
 def reward_from_status(status: int) -> float:
+    """
+    gets test pass reward (pass tests means status 1)
+    """
     if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
         return PASS_REWARD
     return FAIL_REWARD
 
 
 def overlong_penalty(response_tokens: int, *, l_max: int = L_MAX, l_cache: int = L_CACHE) -> float:
+    """
+    computes overlong penalty
+    """
     if l_cache <= 0:
         raise ValueError("l_cache must be positive")
     safe_length = l_max - l_cache
@@ -102,31 +116,8 @@ def overlong_penalty(response_tokens: int, *, l_max: int = L_MAX, l_cache: int =
     return -1.0
 
 
-def final_reward(base_reward: float, response_tokens: int, *, l_max: int = L_MAX, l_cache: int = L_CACHE) -> GradedRollout:
-    penalty = overlong_penalty(response_tokens, l_max=l_max, l_cache=l_cache)
-    return GradedRollout(
-        reward=base_reward + penalty,
-        response_tokens=response_tokens,
-        base_reward=base_reward,
-        overlong_penalty=penalty,
-    )
-
-
-def compute_reward(completion: str, sample: LeetCodeSample, *, token_ids: list[int] | None = None, tokenizer: Any | None = None) -> GradedRollout:
-    tokens = response_token_count(completion, token_ids=token_ids, tokenizer=tokenizer)
-    if make_candidate(completion, sample, rollout_id=sample.task_id) is None:
-        return final_reward(FORMAT_FAIL_REWARD, tokens)
-
-    runner = Runner()
-    runner.start()
-    try:
-        graded = grade_completions(runner, [completion], sample, completion_token_counts=[tokens])
-        return graded[0]
-    finally:
-        runner.stop()
-
-
-def grade_completions(runner: SandboxRunner, completions: list[str], sample: LeetCodeSample, *, completion_token_counts: list[int] | None = None, tokenizer: Any | None = None, timeout: float = 30.0) -> list[GradedRollout]:
+def compute_reward_batch(runner: SandboxRunner, completions: list[str], sample: LeetCodeSample, *, completion_token_counts: list[int] | None = None, tokenizer: Any | None = None, timeout: float = 30.0) -> list[GradedRollout]:
+    """Compute rewards for a batch of completions from one prompt."""
     if completion_token_counts is not None and len(completion_token_counts) != len(completions):
         raise ValueError("completion_token_counts must match completions length")
 
@@ -164,5 +155,6 @@ def grade_completions(runner: SandboxRunner, completions: list[str], sample: Lee
         rollout_id = f"{sample.task_id}:{i}"
         entry = pending[rollout_id]
         base_reward = entry.reward if entry.reward is not None else FAIL_REWARD
-        graded.append(final_reward(base_reward, entry.response_tokens))
+        penalty = overlong_penalty(entry.response_tokens)
+        graded.append(GradedRollout(reward=base_reward + penalty, response_tokens=entry.response_tokens, base_reward=base_reward, overlong_penalty=penalty))
     return graded
