@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from data.prepare_data import LeetCodeSample
+from tiny_coder_rlvr.completion import Completion
 from tiny_coder_rlvr.sandbox.sandbox import Candidate
 
 THINK_END = "</think>"
@@ -31,16 +32,8 @@ class SandboxRunner(Protocol):
 
 
 @dataclass
-class GradedRollout:
-    reward: float
-    response_tokens: int
-    base_reward: float
-    overlong_penalty: float
-
-
-@dataclass
 class PendingRollout:
-    response_tokens: int
+    completion: Completion
     reward: float | None = None
 
 
@@ -51,15 +44,13 @@ def _default_tokenizer():
     path = Path(os.environ.get("TINY_CODER_TOKENIZER", DEFAULT_TOKENIZER_PATH))
     if not path.exists():
         raise RuntimeError(
-            f"tokenizer not found at {path}; pass completion_token_counts from vLLM or a tokenizer"
+            f"tokenizer not found at {path}; pass Completion.token_ids from vLLM or a tokenizer"
         )
     return AutoTokenizer.from_pretrained(path)
 
 
 def response_token_count(completion: str, *, token_ids: list[int] | None = None, tokenizer: Any | None = None) -> int:
-    """
-    gets token length
-    """
+    """Token length of a completion string."""
     if token_ids is not None:
         return len(token_ids)
     tok = tokenizer if tokenizer is not None else _default_tokenizer()
@@ -67,9 +58,7 @@ def response_token_count(completion: str, *, token_ids: list[int] | None = None,
 
 
 def extract_code(completion: str) -> str | None:
-    """
-    uses fences to extract python code from response
-    """
+    """Extract python code from a model response via fences / Solution class."""
     text = completion.strip()
     if THINK_END in text:
         text = text.split(THINK_END, 1)[1].strip()
@@ -82,9 +71,7 @@ def extract_code(completion: str) -> str | None:
 
 
 def make_candidate(completion: str, sample: LeetCodeSample, *, rollout_id: str) -> Candidate | None:
-    """
-    creates candidate object
-    """
+    """Build a sandbox Candidate from completion text + dataset sample."""
     code = extract_code(completion)
     if not code:
         return None
@@ -94,18 +81,14 @@ def make_candidate(completion: str, sample: LeetCodeSample, *, rollout_id: str) 
 
 
 def reward_from_status(status: int) -> float:
-    """
-    gets test pass reward (pass tests means status 1)
-    """
+    """Map sandbox wait status to pass/fail reward."""
     if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
         return PASS_REWARD
     return FAIL_REWARD
 
 
 def overlong_penalty(response_tokens: int, *, l_max: int = L_MAX, l_cache: int = L_CACHE) -> float:
-    """
-    computes overlong penalty
-    """
+    """DAPO-style soft overlong penalty."""
     if l_cache <= 0:
         raise ValueError("l_cache must be positive")
     safe_length = l_max - l_cache
@@ -116,22 +99,26 @@ def overlong_penalty(response_tokens: int, *, l_max: int = L_MAX, l_cache: int =
     return -1.0
 
 
-def compute_reward_batch(runner: SandboxRunner, completions: list[str], sample: LeetCodeSample, *, completion_token_counts: list[int] | None = None, tokenizer: Any | None = None, timeout: float = 30.0) -> list[GradedRollout]:
-    """Compute rewards for a batch of completions from one prompt."""
-    if completion_token_counts is not None and len(completion_token_counts) != len(completions):
-        raise ValueError("completion_token_counts must match completions length")
-
+def compute_reward_batch(
+    runner: SandboxRunner,
+    completions: list[Completion],
+    sample: LeetCodeSample,
+    *,
+    tokenizer: Any | None = None,
+    timeout: float = 30.0,
+) -> list[Completion]:
+    """Grade completions in-place and return the same list with reward fields filled."""
     pending: dict[str, PendingRollout] = {}
 
     for i, completion in enumerate(completions):
         rollout_id = f"{sample.task_id}:{i}"
-        if completion_token_counts is not None:
-            response_tokens = completion_token_counts[i]
-        else:
-            response_tokens = response_token_count(completion, tokenizer=tokenizer)
-        pending[rollout_id] = PendingRollout(response_tokens=response_tokens)
+        if not completion.token_ids:
+            tok = tokenizer if tokenizer is not None else _default_tokenizer()
+            completion.token_ids = tok.encode(completion.text, add_special_tokens=False)
 
-        candidate = make_candidate(completion, sample, rollout_id=rollout_id)
+        pending[rollout_id] = PendingRollout(completion=completion)
+
+        candidate = make_candidate(completion.text, sample, rollout_id=rollout_id)
         if candidate is None:
             pending[rollout_id].reward = FORMAT_FAIL_REWARD
             continue
@@ -150,11 +137,13 @@ def compute_reward_batch(runner: SandboxRunner, completions: list[str], sample: 
 
         time.sleep(0.05)
 
-    graded: list[GradedRollout] = []
-    for i in range(len(completions)):
+    for i, completion in enumerate(completions):
         rollout_id = f"{sample.task_id}:{i}"
         entry = pending[rollout_id]
         base_reward = entry.reward if entry.reward is not None else FAIL_REWARD
-        penalty = overlong_penalty(entry.response_tokens)
-        graded.append(GradedRollout(reward=base_reward + penalty, response_tokens=entry.response_tokens, base_reward=base_reward, overlong_penalty=penalty))
-    return graded
+        penalty = overlong_penalty(completion.response_tokens)
+        completion.base_reward = base_reward
+        completion.overlong_penalty = penalty
+        completion.reward = base_reward + penalty
+
+    return completions

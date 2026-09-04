@@ -6,20 +6,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from data.prepare_data import LeetCodeRLVRDataset, LeetCodeSample, load_leetcode_dataset
 from tests.sandbox_helpers import docker_image_exists
-from tiny_coder_rlvr.reward import FORMAT_FAIL_REWARD, FAIL_REWARD, GradedRollout, L_CACHE, L_MAX, PASS_REWARD, compute_reward_batch, extract_code, make_candidate, overlong_penalty, reward_from_status, response_token_count
+from tiny_coder_rlvr.completion import Completion
+from tiny_coder_rlvr.reward import (
+    FAIL_REWARD,
+    FORMAT_FAIL_REWARD,
+    L_CACHE,
+    L_MAX,
+    PASS_REWARD,
+    compute_reward_batch,
+    extract_code,
+    make_candidate,
+    overlong_penalty,
+    response_token_count,
+    reward_from_status,
+)
 from tiny_coder_rlvr.sandbox.runner import create_sandbox_runner_pool
 
 
-def compute_reward_single(completion: str, sample: LeetCodeSample, *, token_ids: list[int] | None = None) -> GradedRollout:
-    tokens = response_token_count(completion, token_ids=token_ids)
+def _completion(text: str, token_ids: list[int]) -> Completion:
+    return Completion(text=text, token_ids=token_ids)
+
+
+def compute_reward_single(completion: str, sample: LeetCodeSample, *, token_ids: list[int] | None = None) -> Completion:
+    rollout = _completion(completion, list(token_ids) if token_ids is not None else [])
     if make_candidate(completion, sample, rollout_id=sample.task_id) is None:
-        penalty = overlong_penalty(tokens)
-        return GradedRollout(reward=FORMAT_FAIL_REWARD + penalty, response_tokens=tokens, base_reward=FORMAT_FAIL_REWARD, overlong_penalty=penalty)
+        penalty = overlong_penalty(rollout.response_tokens)
+        rollout.base_reward = FORMAT_FAIL_REWARD
+        rollout.overlong_penalty = penalty
+        rollout.reward = FORMAT_FAIL_REWARD + penalty
+        return rollout
 
     runner = create_sandbox_runner_pool(1)
     try:
-        graded = compute_reward_batch(runner, [completion], sample, completion_token_counts=[tokens])
-        return graded[0]
+        return compute_reward_batch(runner, [rollout], sample)[0]
     finally:
         runner.stop()
 
@@ -117,14 +136,14 @@ class RewardAsyncTest(unittest.TestCase):
             "```"
         )
         completions = [
-            self.sample.completion,
-            "not valid output",
-            bad_code,
+            _completion(self.sample.completion, list(range(100))),
+            _completion("not valid output", list(range(5))),
+            _completion(bad_code, list(range(42))),
         ]
 
         runner = create_sandbox_runner_pool(1)
         try:
-            graded = compute_reward_batch(runner, completions, self.sample, completion_token_counts=[100, 5, 42])
+            graded = compute_reward_batch(runner, completions, self.sample)
         finally:
             runner.stop()
 
