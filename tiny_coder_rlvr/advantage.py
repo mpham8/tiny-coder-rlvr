@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import torch
+
 DEFAULT_EPS = 1e-8
 
 
 def grpo_advantages(rewards: list[float], *, eps: float = DEFAULT_EPS) -> list[float]:
-    mean = sum(rewards) / len(rewards)
-    variance = sum((reward - mean) ** 2 for reward in rewards) / len(rewards)
-    std = variance ** 0.5
-    
-    return [(reward - mean) / (std + eps) for reward in rewards]
+    rewards_t = torch.tensor(rewards, dtype=torch.float32)
+    mean = rewards_t.mean()
+    std = rewards_t.std()
+    return ((rewards_t - mean) / (std + eps)).tolist()
 
 
 def grpo_advantages_batch(reward_groups: list[list[float]], *, eps: float = DEFAULT_EPS) -> list[list[float]]:
