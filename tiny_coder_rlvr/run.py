@@ -109,6 +109,7 @@ def main(argv: list[str] | None = None) -> None:
         eval_every=int(cfg.get("eval_every", 50)),
         eval_samples=int(cfg.get("eval_samples", 4)),
         save_every=int(cfg.get("save_every", 30)),
+        train_microbatch_size=int(cfg.get("train_microbatch_size", 1)),
     )
 
     try:

@@ -12,6 +12,7 @@ from tiny_coder_rlvr import settings
 from tiny_coder_rlvr.advantage import grpo_advantages_batch
 from tiny_coder_rlvr.completion import Completion
 from tiny_coder_rlvr.loss import grpo_loss
+from tiny_coder_rlvr.model import move_optimizer_state
 from tiny_coder_rlvr.reward import compute_reward_batch
 
 TRAIN_STATE_NAME = "train_state.pt"
@@ -34,6 +35,7 @@ class Trainer:
         eval_every: int = 50,
         eval_samples: int = 4,
         save_every: int = 30,
+        train_microbatch_size: int = 1,
     ):
         self.policy = policy
         self.generator = generator
@@ -48,6 +50,7 @@ class Trainer:
         self.eval_every = eval_every
         self.eval_samples = eval_samples
         self.save_every = save_every
+        self.train_microbatch_size = max(1, int(train_microbatch_size))
 
         self.start_epoch = 0
         self.start_batch_idx = 0
@@ -255,27 +258,53 @@ class Trainer:
                 completions = [c for group in grouped_completions for c in group]
 
                 # Discard vLLM weights+KV for training; keep engine for fast wake + IPC.
+                # Keep Adam on CPU always — with long traces, weights+Adam+backward OOMs a 3090.
                 self.generator.sleep(level=2)
-                self.policy.to_gpu(self.optimizer)
+                torch.cuda.empty_cache()
+                move_optimizer_state(self.optimizer, "cpu")
+                self.policy.to_gpu()
 
-                #build training tensors
-                mask, log_probs, old_log_probs, advantages_t = self.build_training_tensors(
-                    completions,
-                    advantages,
-                    prompt_token_ids,
+                # Microbatch HF forward/backward: a full group of long thinking
+                # traces OOMs if padded into one [G, T, V] logits tensor.
+                total_tokens = sum(len(c.token_ids) for c in completions)
+                total_tokens_t = torch.tensor(
+                    float(max(total_tokens, 1)),
+                    device=next(self.policy.model.parameters()).device,
                 )
+                self.optimizer.zero_grad(set_to_none=True)
+                loss_acc = 0.0
+                micro = self.train_microbatch_size
+                for start in range(0, len(completions), micro):
+                    end = min(start + micro, len(completions))
+                    mask, log_probs, old_log_probs, advantages_t = self.build_training_tensors(
+                        completions[start:end],
+                        advantages[start:end],
+                        prompt_token_ids[start:end],
+                    )
+                    loss = grpo_loss(
+                        mask,
+                        log_probs,
+                        old_log_probs,
+                        advantages_t,
+                        normalize_tokens=total_tokens_t,
+                    )
+                    loss.backward()
+                    loss_acc += float(loss.detach().item())
 
-                #grpo loss, optimizer step
-                loss = grpo_loss(mask, log_probs, old_log_probs, advantages_t)
-                self.optimizer.zero_grad()
-                loss.backward()
+                # Optimizer step on CPU (params+grads move with the module).
+                self.policy.model.to("cpu")
+                torch.cuda.empty_cache()
                 self.optimizer.step()
+                self.optimizer.zero_grad(set_to_none=True)
                 global_step += 1
+                loss_value = loss_acc
 
-                # Wake weight storage only → IPC sync → free HF → restore KV.
+                # IPC needs HF weights on GPU; Adam stays on CPU.
+                self.policy.model.to("cuda")
+                torch.cuda.empty_cache()
                 self.generator.wake_up(tags=["weights"])
                 self.generator.sync_weights()
-                self.policy.to_cpu(self.optimizer)
+                self.policy.to_cpu()
                 self.generator.wake_up(tags=["kv_cache"])
 
                 next_batch_idx = batch_idx + 1
@@ -295,7 +324,7 @@ class Trainer:
                 mean_reward = sum(c.reward for c in completions) / max(len(completions), 1)
                 mean_response_len = sum(c.response_tokens for c in completions) / max(len(completions), 1)
                 pbar.set_postfix(
-                    loss=f"{loss.item():.4f}",
+                    loss=f"{loss_value:.4f}",
                     reward=f"{mean_reward:.3f}",
                     resp_len=f"{mean_response_len:.0f}",
                     step=global_step,
@@ -303,7 +332,7 @@ class Trainer:
                 if wandb_run is not None:
                     wandb_run.log(
                         {
-                            "train/loss": loss.item(),
+                            "train/loss": loss_value,
                             "train/reward": mean_reward,
                             "train/mean_response_length": mean_response_len,
                             "epoch": epoch,

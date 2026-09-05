@@ -13,9 +13,13 @@ def grpo_loss(
     *,
     epsilon_low: float | None = None,
     epsilon_high: float | None = None,
+    normalize_tokens: float | torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    DAPO Style GRPO Loss, make sure mask is 1 for only reponse tokens
+    DAPO Style GRPO Loss, make sure mask is 1 for only reponse tokens.
+
+    If normalize_tokens is set, divide by that (for microbatch grad accumulation
+    that matches a global token-mean over the full group).
     """
     if epsilon_low is None:
         epsilon_low = float(settings.epsilon_low)
@@ -25,7 +29,8 @@ def grpo_loss(
     a = advantages.unsqueeze(-1)
     r = (log_probs - old_log_probs).exp()
     per_token = torch.min(r * a, torch.clamp(r, 1.0 - epsilon_low, 1 + epsilon_high) * a)
-    loss = (per_token * mask).sum() / mask.sum().clamp_min(1)
+    denom = mask.sum().clamp_min(1) if normalize_tokens is None else normalize_tokens
+    loss = (per_token * mask).sum() / denom
 
     return -loss
 

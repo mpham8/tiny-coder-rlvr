@@ -14,7 +14,9 @@ from tiny_coder_rlvr.completion import Completion
 from tiny_coder_rlvr.sandbox.sandbox import Candidate
 
 THINK_END = "</think>"
-PYTHON_FENCE = re.compile(r"```python\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+# ```python ... ``` or bare ``` ... ``` (closing fence required for this path)
+CODE_FENCE = re.compile(r"```(?:python|py)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
+OPEN_FENCE = re.compile(r"^```(?:python|py)?\s*\n?", re.IGNORECASE)
 
 
 def _format_fail_reward() -> float:
@@ -87,10 +89,19 @@ def extract_code(completion: str) -> str | None:
     text = completion.strip()
     if THINK_END in text:
         text = text.split(THINK_END, 1)[1].strip()
-    match = PYTHON_FENCE.search(text)
+
+    match = CODE_FENCE.search(text)
     if match:
-        return match.group(1).strip()
-    if "class Solution" in text:
+        text = match.group(1).strip()
+    else:
+        # Unclosed / partial fence leftovers (e.g. leading ``` or stray `).
+        text = OPEN_FENCE.sub("", text).strip()
+        text = text.strip("`").strip()
+
+    idx = text.find("class Solution")
+    if idx >= 0:
+        return text[idx:].rstrip()
+    if match and text:
         return text
     return None
 
@@ -152,7 +163,9 @@ def compute_reward_batch(
 
         pending[rollout_id] = PendingRollout(completion=completion)
 
-        candidate = make_candidate(completion.text, sample, rollout_id=rollout_id)
+        # Prefer parsed solution content when the reasoning parser already split it out.
+        source = completion.solution if completion.solution else completion.text
+        candidate = make_candidate(source, sample, rollout_id=rollout_id)
         if candidate is None:
             pending[rollout_id].reward = _format_fail_reward()
             continue

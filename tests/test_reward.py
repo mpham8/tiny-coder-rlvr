@@ -63,6 +63,17 @@ class RewardParsingTest(unittest.TestCase):
     def test_extract_code_returns_none_for_garbage(self):
         self.assertIsNone(extract_code("still thinking with no code"))
 
+    def test_extract_code_strips_stray_backtick_before_solution(self):
+        completion = "`class Solution:\n    def solve(self):\n        return 1\n"
+        self.assertEqual(
+            extract_code(completion),
+            "class Solution:\n    def solve(self):\n        return 1",
+        )
+
+    def test_extract_code_from_bare_fence(self):
+        completion = "```\nclass Solution:\n    pass\n```"
+        self.assertEqual(extract_code(completion), "class Solution:\n    pass")
+
 
 class RewardStatusTest(unittest.TestCase):
     def test_reward_from_success_status(self):

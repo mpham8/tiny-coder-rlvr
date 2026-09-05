@@ -6,7 +6,9 @@ tokenizer_path: checkpoints/hf-vllm-handoff
 
 num_epochs: 1
 batch_size: 1
-group_size: 8
+group_size: 16
+# HF train microbatch over the G rollouts (1 avoids OOM on long thinking traces).
+train_microbatch_size: 1
 lr: 1.0e-6
 seed: 42
 eval_every: 50
