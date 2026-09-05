@@ -7,8 +7,7 @@ import threading
 import time
 
 from tiny_coder_rlvr.sandbox.sandbox import Candidate, candidates_queue, running, sweep_once
-
-DEFAULT_DOCKER_IMAGE = "tiny-coder-sandbox"
+from tiny_coder_rlvr import settings
 
 
 def _candidate_from_message(message: dict) -> Candidate:
@@ -22,8 +21,8 @@ def _candidate_to_message(candidate: Candidate) -> dict:
 class DockerRunner:
     """Production sandbox client: long-lived worker in an isolated Docker container."""
 
-    def __init__(self, image: str = DEFAULT_DOCKER_IMAGE, docker_bin: str = "docker"):
-        self._image = image
+    def __init__(self, image: str | None = None, docker_bin: str = "docker"):
+        self._image = image if image is not None else str(settings.docker_image)
         self._docker_bin = docker_bin
         self._proc = None
         self._results: queue.Queue = queue.Queue()
@@ -82,7 +81,7 @@ class DockerRunner:
         self._proc = None
 
 
-def _create_sandbox_runner(image: str = DEFAULT_DOCKER_IMAGE, docker_bin: str = "docker") -> DockerRunner:
+def _create_sandbox_runner(image: str | None = None, docker_bin: str = "docker") -> DockerRunner:
     runner = DockerRunner(image=image, docker_bin=docker_bin)
     runner.start()
     return runner
@@ -115,10 +114,16 @@ class DockerRunnerPool:
             runner.stop(timeout=timeout)
 
 
-def create_sandbox_runner_pool(n: int, *, image: str = DEFAULT_DOCKER_IMAGE, docker_bin: str = "docker") -> DockerRunnerPool:
+def create_sandbox_runner_pool(n: int, *, image: str | None = None, docker_bin: str = "docker") -> DockerRunnerPool:
     if n < 1:
         raise ValueError("n must be at least 1")
     return DockerRunnerPool([_create_sandbox_runner(image=image, docker_bin=docker_bin) for _ in range(n)])
+
+
+def __getattr__(name: str):
+    if name == "DEFAULT_DOCKER_IMAGE":
+        return str(settings.docker_image)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _stdin_reader(job_queue: queue.Queue):

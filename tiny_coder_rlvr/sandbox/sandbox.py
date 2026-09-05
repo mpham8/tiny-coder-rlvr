@@ -8,9 +8,8 @@ import tempfile
 import time
 
 from tiny_coder_rlvr.sandbox.process_limits import RECURSION_LIMIT, apply_limits
+from tiny_coder_rlvr import settings
 
-
-MAX_CONCURRENT = 16
 
 candidates_queue = collections.deque()
 running = {}
@@ -89,7 +88,7 @@ def start(candidate):
 def sweep_once():
     finished = []
 
-    while len(running) < MAX_CONCURRENT and candidates_queue:
+    while len(running) < int(settings.max_concurrent) and candidates_queue:
         start(candidates_queue.popleft())
 
     for pid in list(running.keys()):

@@ -8,13 +8,7 @@ import torch
 from datasets import Dataset, load_dataset
 from torch.utils.data import DataLoader, Dataset as TorchDataset
 
-DATASET_NAME = "newfacade/LeetCodeDataset"
-LCB_DATASET = "livecodebench/code_generation_lite"
-LCB_RELEASE = "release_v6"
-CF_DATASET = "open-r1/codeforces"
-CF_CONFIG = "verifiable-prompts"
-CF_LANGUAGE = "python"
-DEFAULT_NGRAM_SIZE = 12
+from tiny_coder_rlvr import settings
 
 
 @dataclass(frozen=True)
@@ -84,18 +78,25 @@ def has_ngram_overlap(text: str, ngram_lookup: set[str], ngram_size: int) -> boo
 
 @lru_cache(maxsize=4)
 def _load_lcb_eval() -> tuple[str, ...]:
-    dataset = load_dataset(LCB_DATASET, LCB_RELEASE, split="test", trust_remote_code=True)
+    dataset = load_dataset(
+        str(settings.lcb_dataset),
+        str(settings.lcb_release),
+        split="test",
+        trust_remote_code=True,
+    )
     return tuple(dataset["question_content"])
 
 
 @lru_cache(maxsize=4)
 def _load_cf_eval_descriptions() -> tuple[str, ...]:
-    dataset = load_dataset(CF_DATASET, CF_CONFIG, split="test", trust_remote_code=True)
-    descriptions = tuple(
-        row["description"]
-        for row in dataset
-        if row["language"] == CF_LANGUAGE
+    dataset = load_dataset(
+        str(settings.cf_dataset),
+        str(settings.cf_config),
+        split="test",
+        trust_remote_code=True,
     )
+    language = str(settings.cf_language)
+    descriptions = tuple(row["description"] for row in dataset if row["language"] == language)
     return descriptions
 
 
@@ -106,24 +107,48 @@ def _eval_ngram_lookups(ngram_size: int) -> tuple[set[str], set[str]]:
     return lcb_lookup, cf_lookup
 
 
-def is_contaminated(problem_description: str, *, ngram_size: int = DEFAULT_NGRAM_SIZE, lcb_lookup: set[str] | None = None, cf_lookup: set[str] | None = None) -> bool:
+def is_contaminated(
+    problem_description: str,
+    *,
+    ngram_size: int | None = None,
+    lcb_lookup: set[str] | None = None,
+    cf_lookup: set[str] | None = None,
+) -> bool:
+    if ngram_size is None:
+        ngram_size = int(settings.ngram_size)
     if lcb_lookup is None or cf_lookup is None:
         lcb_lookup, cf_lookup = _eval_ngram_lookups(ngram_size)
 
-    return has_ngram_overlap(problem_description, lcb_lookup, ngram_size) or has_ngram_overlap(problem_description, cf_lookup, ngram_size)
+    return has_ngram_overlap(problem_description, lcb_lookup, ngram_size) or has_ngram_overlap(
+        problem_description, cf_lookup, ngram_size
+    )
 
 
-def filter_contaminated(dataset: Dataset, *, ngram_size: int = DEFAULT_NGRAM_SIZE) -> Dataset:
+def filter_contaminated(dataset: Dataset, *, ngram_size: int | None = None) -> Dataset:
+    if ngram_size is None:
+        ngram_size = int(settings.ngram_size)
     lcb_lookup, cf_lookup = _eval_ngram_lookups(ngram_size)
 
     def keep_row(row: dict[str, Any]) -> bool:
-        return not is_contaminated(row["problem_description"], ngram_size=ngram_size, lcb_lookup=lcb_lookup, cf_lookup=cf_lookup)
+        return not is_contaminated(
+            row["problem_description"],
+            ngram_size=ngram_size,
+            lcb_lookup=lcb_lookup,
+            cf_lookup=cf_lookup,
+        )
 
     return dataset.filter(keep_row)
 
 
-def load_leetcode_dataset(split: str = "train", *, decontaminate: bool = True, ngram_size: int = DEFAULT_NGRAM_SIZE) -> Dataset:
-    dataset = load_dataset(DATASET_NAME, split=split)
+def load_leetcode_dataset(
+    split: str = "train",
+    *,
+    decontaminate: bool = True,
+    ngram_size: int | None = None,
+) -> Dataset:
+    if ngram_size is None:
+        ngram_size = int(settings.ngram_size)
+    dataset = load_dataset(str(settings.dataset_name), split=split)
     if decontaminate:
         dataset = filter_contaminated(dataset, ngram_size=ngram_size)
     return dataset
@@ -145,18 +170,22 @@ def get_dataloader(
     *,
     seed: int | None = None,
     decontaminate: bool = True,
-    ngram_size: int = DEFAULT_NGRAM_SIZE,
+    ngram_size: int | None = None,
     **loader_kwargs: Any,
 ) -> DataLoader:
     if shuffle is None:
         shuffle = split == "train"
+    if ngram_size is None:
+        ngram_size = int(settings.ngram_size)
 
     generator = None
     if seed is not None and shuffle:
         generator = torch.Generator()
         generator.manual_seed(int(seed))
 
-    dataset = LeetCodeRLVRDataset(load_leetcode_dataset(split, decontaminate=decontaminate, ngram_size=ngram_size))
+    dataset = LeetCodeRLVRDataset(
+        load_leetcode_dataset(split, decontaminate=decontaminate, ngram_size=ngram_size)
+    )
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -170,3 +199,18 @@ def get_dataloader(
 
 def sample_to_dict(sample: LeetCodeSample) -> dict[str, Any]:
     return asdict(sample)
+
+
+def __getattr__(name: str):
+    mapping = {
+        "DATASET_NAME": "dataset_name",
+        "LCB_DATASET": "lcb_dataset",
+        "LCB_RELEASE": "lcb_release",
+        "CF_DATASET": "cf_dataset",
+        "CF_CONFIG": "cf_config",
+        "CF_LANGUAGE": "cf_language",
+        "DEFAULT_NGRAM_SIZE": "ngram_size",
+    }
+    if name in mapping:
+        return settings.get(mapping[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

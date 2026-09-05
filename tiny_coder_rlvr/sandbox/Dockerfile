@@ -5,6 +5,7 @@ WORKDIR /app
 COPY tiny_coder_rlvr/sandbox/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY config /app/config
 COPY tiny_coder_rlvr /app/tiny_coder_rlvr
 
 ENV PYTHONPATH=/app

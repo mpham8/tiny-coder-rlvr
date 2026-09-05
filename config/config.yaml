@@ -2,7 +2,7 @@ model: Qwen/Qwen3-1.7B-Base
 # Prefer local HF weights when present (also used after resume).
 init_checkpoint: checkpoints/hf-vllm-handoff
 checkpoint_path: checkpoints/train
-intermediate_path: checkpoints/hf-vllm-handoff-live
+tokenizer_path: checkpoints/hf-vllm-handoff
 
 num_epochs: 1
 batch_size: 1
@@ -10,22 +10,55 @@ group_size: 8
 lr: 1.0e-6
 seed: 42
 eval_every: 50
+# Random test subset per eval (keeps step-0 eval). <=0 means full test set.
+eval_samples: 4
+# Full HF+optimizer checkpoint cadence. With group_size=8 + thinking, ~1–3 min/step
+# is typical → ~20–60 steps/hour; 30 ≈ hourly (plus always save at end of train).
 save_every: 30
 num_runners: 2
 resume: true
 
 dtype: bfloat16
 max_model_len: 8192
-# Higher util is fine with weight_sync=ipc: sleep(level=2) frees vLLM VRAM before HF train.
+max_new_tokens: 7168
+# sleep(level=2) frees vLLM VRAM before HF train; IPC syncs weights after.
 gpu_memory_utilization: 0.85
 reasoning_parser_name: qwen3
-# disk: save HF → rebuild/load vLLM each step
-# ipc: keep vLLM process alive; sleep during train; IPC sync after wake(weights)
-weight_sync: ipc
+
+temperature: 0.6
+top_p: 0.95
+top_k: 20
 
 decontaminate: true
+dataset_name: newfacade/LeetCodeDataset
+lcb_dataset: livecodebench/code_generation_lite
+lcb_release: release_v6
+cf_dataset: open-r1/codeforces
+cf_config: verifiable-prompts
+cf_language: python
+ngram_size: 12
 
-WANDB_ENABLED: true
-WANDB_PROJECT: tiny-coder-rlvr
-WANDB_ENTITY: null
-WANDB_RUN_NAME: null
+format_fail_reward: -1.0
+pass_reward: 1.0
+fail_reward: -1.0
+l_max: 7168
+l_cache: 4096
+
+epsilon_low: 0.2
+epsilon_high: 0.28
+advantage_eps: 1.0e-8
+
+docker_image: tiny-coder-sandbox
+max_concurrent: 16
+memory_limit_bytes: 536870912   # 512 MiB
+cpu_limit_seconds: 5
+proc_limit: 1
+open_files_limit: 32
+write_file_limit_bytes: 10485760  # 10 MiB
+core_dump_limit: 0
+recursion_limit: 1000
+
+wandb_enabled: true
+wandb_project: tiny-coder-rlvr
+wandb_entity: null
+wandb_run_name: null

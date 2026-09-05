@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 import torch
@@ -7,10 +8,11 @@ from tqdm import tqdm
 import wandb
 
 from data.prepare_data import LeetCodeSample, sample_to_dict
+from tiny_coder_rlvr import settings
 from tiny_coder_rlvr.advantage import grpo_advantages_batch
 from tiny_coder_rlvr.completion import Completion
 from tiny_coder_rlvr.loss import grpo_loss
-from tiny_coder_rlvr.reward import PASS_REWARD, compute_reward_batch
+from tiny_coder_rlvr.reward import compute_reward_batch
 
 TRAIN_STATE_NAME = "train_state.pt"
 
@@ -24,13 +26,13 @@ class Trainer:
         dataloader,
         group_size,
         num_epochs,
-        intermediate_path,
         checkpoint_path,
         runner,
         cfg: dict | None = None,
         resume: bool = True,
         eval_dataloader=None,
         eval_every: int = 50,
+        eval_samples: int = 4,
         save_every: int = 30,
     ):
         self.policy = policy
@@ -39,12 +41,12 @@ class Trainer:
         self.dataloader = dataloader
         self.group_size = group_size
         self.num_epochs = num_epochs
-        self.intermediate_path = Path(intermediate_path)
         self.checkpoint_path = Path(checkpoint_path)
         self.runner = runner
         self.cfg = cfg or {}
         self.eval_dataloader = eval_dataloader
         self.eval_every = eval_every
+        self.eval_samples = eval_samples
         self.save_every = save_every
 
         self.start_epoch = 0
@@ -130,37 +132,44 @@ class Trainer:
             self.checkpoint_path / TRAIN_STATE_NAME,
         )
 
-    def evaluate(self) -> dict[str, float]:
-        """Run test set with vLLM (must already be loaded). Returns mean reward / pass@1."""
+    def evaluate(self, *, global_step: int = 0) -> dict[str, float]:
+        """Eval on up to `eval_samples` random test items (full set if eval_samples <= 0)."""
         if self.eval_dataloader is None:
             raise RuntimeError("eval_dataloader was not provided")
         if self.generator.llm is None:
             raise RuntimeError("generator.load() must be called before evaluate()")
 
+        dataset = self.eval_dataloader.dataset
+        n = len(dataset)
+        if n == 0:
+            return {"eval/reward": 0.0, "eval/pass_rate": 0.0, "eval/n": 0.0}
+
+        if self.eval_samples <= 0 or self.eval_samples >= n:
+            indices = list(range(n))
+        else:
+            seed = int(self.cfg.get("seed", 0)) + int(global_step)
+            indices = random.Random(seed).sample(range(n), self.eval_samples)
+
         rewards: list[float] = []
         passes = 0
-        total = 0
-        for batch in tqdm(self.eval_dataloader, desc="eval", leave=False):
-            batch_size = len(batch["task_id"])
-            samples = [
-                LeetCodeSample(**{key: batch[key][i] for key in batch})
-                for i in range(batch_size)
-            ]
-            for sample in samples:
-                sample_dict = sample_to_dict(sample)
-                completion = self.generator.generate(sample=sample_dict, n=1)[0]
-                compute_reward_batch(
-                    self.runner,
-                    [completion],
-                    sample,
-                    tokenizer=self.policy.tokenizer,
-                )
-                rewards.append(float(completion.reward))
-                passes += int(completion.base_reward == PASS_REWARD)
-                total += 1
+        for idx in tqdm(indices, desc="eval", leave=False):
+            sample = dataset[idx]
+            if not isinstance(sample, LeetCodeSample):
+                sample = LeetCodeSample(**sample)
+            sample_dict = sample_to_dict(sample)
+            completion = self.generator.generate(sample=sample_dict, n=1)[0]
+            compute_reward_batch(
+                self.runner,
+                [completion],
+                sample,
+                tokenizer=self.policy.tokenizer,
+            )
+            rewards.append(float(completion.reward))
+            passes += int(completion.base_reward == settings.pass_reward)
 
+        total = len(indices)
         return {
-            "eval/reward": sum(rewards) / max(len(rewards), 1),
+            "eval/reward": sum(rewards) / max(total, 1),
             "eval/pass_rate": passes / max(total, 1),
             "eval/n": float(total),
         }
@@ -169,16 +178,18 @@ class Trainer:
         #wb setup
         wandb_run = None
         cfg = self.cfg
-        if cfg.get("WANDB_ENABLED", False):
+        if cfg.get("wandb_enabled", cfg.get("WANDB_ENABLED", False)):
 
             init_kwargs = {
-                "project": cfg.get("WANDB_PROJECT", "rlhf-summarize"),
+                "project": cfg.get("wandb_project", cfg.get("WANDB_PROJECT", "tiny-coder-rlvr")),
                 "config": cfg,
             }
-            if cfg.get("WANDB_ENTITY"):
-                init_kwargs["entity"] = cfg["WANDB_ENTITY"]
-            if cfg.get("WANDB_RUN_NAME"):
-                init_kwargs["name"] = cfg["WANDB_RUN_NAME"]
+            entity = cfg.get("wandb_entity", cfg.get("WANDB_ENTITY"))
+            if entity:
+                init_kwargs["entity"] = entity
+            run_name = cfg.get("wandb_run_name", cfg.get("WANDB_RUN_NAME"))
+            if run_name:
+                init_kwargs["name"] = run_name
             wandb_run = wandb.init(**init_kwargs)
 
         global_step = self.global_step
@@ -194,25 +205,13 @@ class Trainer:
                 if epoch == self.start_epoch and batch_idx < self.start_batch_idx:
                     continue
 
-                # HF ↔ vLLM weight handoff
-                if self.generator.weight_sync == "ipc":
-                    # Persistent engine: seed once from disk, then sleep/wake + IPC.
-                    if self.generator.llm is None:
-                        self.policy.to_cpu(self.optimizer)
-                        self.generator.checkpoint_path = str(self.intermediate_path)
-                        self.policy.save(self.intermediate_path)
-                        self.generator.load()
-                        # IPC bind only needs a module reference; keep HF on CPU
-                        # while vLLM holds rollout VRAM.
-                        self.generator.init_weight_sync(self.policy.model)
-                    else:
-                        self.policy.to_cpu(self.optimizer)
-                        self.generator.ensure_awake()
-                else:
-                    self.policy.to_cpu(self.optimizer)
-                    self.policy.save(self.intermediate_path)
-                    self.generator.checkpoint_path = str(self.intermediate_path)
+                # Boot vLLM once from the policy checkpoint; later steps use IPC.
+                self.policy.to_cpu(self.optimizer)
+                if self.generator.llm is None:
                     self.generator.load()
+                    self.generator.init_weight_sync(self.policy.model)
+                else:
+                    self.generator.ensure_awake()
 
                 # periodic test eval (reuse loaded / awake vLLM)
                 if (
@@ -220,7 +219,7 @@ class Trainer:
                     and self.eval_every > 0
                     and global_step % self.eval_every == 0
                 ):
-                    eval_metrics = self.evaluate()
+                    eval_metrics = self.evaluate(global_step=global_step)
                     if wandb_run is not None:
                         wandb_run.log({**eval_metrics, "global_step": global_step, "epoch": epoch})
 
@@ -255,12 +254,8 @@ class Trainer:
                 advantages = [a for group in advantage_groups for a in group]
                 completions = [c for group in grouped_completions for c in group]
 
-                # free GPU for training
-                if self.generator.weight_sync == "disk":
-                    self.generator.shutdown()
-                else:
-                    # Discard vLLM weights+KV; keep engine process for fast wake + IPC.
-                    self.generator.sleep(level=2)
+                # Discard vLLM weights+KV for training; keep engine for fast wake + IPC.
+                self.generator.sleep(level=2)
                 self.policy.to_gpu(self.optimizer)
 
                 #build training tensors
@@ -277,12 +272,11 @@ class Trainer:
                 self.optimizer.step()
                 global_step += 1
 
-                if self.generator.weight_sync == "ipc":
-                    # Wake weight storage only → IPC sync → free HF → restore KV.
-                    self.generator.wake_up(tags=["weights"])
-                    self.generator.sync_weights()
-                    self.policy.to_cpu(self.optimizer)
-                    self.generator.wake_up(tags=["kv_cache"])
+                # Wake weight storage only → IPC sync → free HF → restore KV.
+                self.generator.wake_up(tags=["weights"])
+                self.generator.sync_weights()
+                self.policy.to_cpu(self.optimizer)
+                self.generator.wake_up(tags=["kv_cache"])
 
                 next_batch_idx = batch_idx + 1
                 next_epoch = epoch

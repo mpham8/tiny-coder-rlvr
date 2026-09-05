@@ -5,17 +5,16 @@ import time
 
 from typing import Protocol
 
-from tiny_coder_rlvr.sandbox.runner import DEFAULT_DOCKER_IMAGE
+from tiny_coder_rlvr import settings
 
 
 class _PollableRunner(Protocol):
     def poll_results(self) -> list[tuple[str, int]]: ...
 
 
-SANDBOX_IMAGE = DEFAULT_DOCKER_IMAGE
-
-
-def docker_image_exists(name: str = SANDBOX_IMAGE) -> bool:
+def docker_image_exists(name: str | None = None) -> bool:
+    if name is None:
+        name = str(settings.docker_image)
     if shutil.which("docker") is None:
         return False
     result = subprocess.run(["docker", "image", "inspect", name], capture_output=True, check=False)

@@ -88,7 +88,6 @@ class TrainerHelpersTest(unittest.TestCase):
                 dataloader=[],
                 group_size=2,
                 num_epochs=1,
-                intermediate_path=tmp,
                 checkpoint_path=tmp,
                 runner=MagicMock(),
                 resume=False,
@@ -128,7 +127,6 @@ class TrainerHelpersTest(unittest.TestCase):
                 dataloader=[],
                 group_size=1,
                 num_epochs=1,
-                intermediate_path=tmp,
                 checkpoint_path=tmp,
                 runner=MagicMock(),
                 resume=False,
@@ -152,7 +150,6 @@ class TrainerHelpersTest(unittest.TestCase):
                 dataloader=[],
                 group_size=1,
                 num_epochs=3,
-                intermediate_path=tmp,
                 checkpoint_path=tmp,
                 runner=MagicMock(),
                 resume=False,
@@ -170,7 +167,6 @@ class TrainerHelpersTest(unittest.TestCase):
                 dataloader=[],
                 group_size=1,
                 num_epochs=3,
-                intermediate_path=tmp,
                 checkpoint_path=tmp,
                 runner=MagicMock(),
                 resume=True,
@@ -195,14 +191,12 @@ class TrainerRealIntegrationTest(unittest.TestCase):
         optimizer = torch.optim.AdamW(policy.model.parameters(), lr=1e-6)
 
         with tempfile.TemporaryDirectory(prefix="train-step-") as tmp:
-            intermediate = Path(tmp) / "intermediate"
             checkpoint = Path(tmp) / "checkpoint"
-            intermediate.mkdir()
             checkpoint.mkdir()
 
             generator = VllmGenerator(
                 model_name=str(SOURCE_CHECKPOINT),
-                checkpoint_path=str(intermediate),
+                model_path=str(SOURCE_CHECKPOINT),
                 dtype="bfloat16",
                 max_model_len=2048,
                 gpu_memory_utilization=0.85,
@@ -216,17 +210,16 @@ class TrainerRealIntegrationTest(unittest.TestCase):
                     dataloader=[batch],
                     group_size=GROUP_SIZE,
                     num_epochs=1,
-                    intermediate_path=str(intermediate),
                     checkpoint_path=str(checkpoint),
                     runner=runner,
-                    cfg={"WANDB_ENABLED": False},
+                    cfg={"wandb_enabled": False},
                     resume=False,
                 )
                 trainer.train()
             finally:
                 generator.shutdown()
                 runner.stop()
-                policy.to_cpu()
+                policy.to_cpu(optimizer)
                 del policy
                 torch.cuda.empty_cache()
 

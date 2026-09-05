@@ -7,8 +7,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from data import prepare_data
 from data.prepare_data import (
-    DATASET_NAME,
-    DEFAULT_NGRAM_SIZE,
     LeetCodeRLVRDataset,
     build_ngram_lookup,
     collate_leetcode_samples,
@@ -19,6 +17,7 @@ from data.prepare_data import (
     load_leetcode_dataset,
     word_ngrams,
 )
+from tiny_coder_rlvr import settings
 
 
 class NgramUtilTest(unittest.TestCase):
@@ -51,10 +50,10 @@ class PrepareDataTest(unittest.TestCase):
         prepare_data._eval_ngram_lookups.cache_clear()
 
     def test_dataset_name(self):
-        self.assertEqual(DATASET_NAME, "newfacade/LeetCodeDataset")
+        self.assertEqual(settings.dataset_name, "newfacade/LeetCodeDataset")
 
     def test_default_ngram_size(self):
-        self.assertEqual(DEFAULT_NGRAM_SIZE, 12)
+        self.assertEqual(settings.ngram_size, 12)
 
     def test_load_train_split_without_decontamination(self):
         dataset = load_leetcode_dataset(split="train", decontaminate=False)
@@ -138,7 +137,7 @@ class PrepareDataTest(unittest.TestCase):
 
     def test_decontaminated_train_is_smaller_than_raw(self):
         raw = load_leetcode_dataset(split="train", decontaminate=False)
-        clean = load_leetcode_dataset(split="train", decontaminate=True, ngram_size=DEFAULT_NGRAM_SIZE)
+        clean = load_leetcode_dataset(split="train", decontaminate=True, ngram_size=int(settings.ngram_size))
         self.assertLess(len(clean), len(raw))
 
 

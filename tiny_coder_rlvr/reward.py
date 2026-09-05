@@ -9,20 +9,44 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from data.prepare_data import LeetCodeSample
+from tiny_coder_rlvr import settings
 from tiny_coder_rlvr.completion import Completion
 from tiny_coder_rlvr.sandbox.sandbox import Candidate
 
 THINK_END = "</think>"
 PYTHON_FENCE = re.compile(r"```python\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
-FORMAT_FAIL_REWARD = -1.0
-PASS_REWARD = 1.0
-FAIL_REWARD = -1.0
-L_MAX = 7168
-L_CACHE = 4096
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TOKENIZER_PATH = _REPO_ROOT / "checkpoints" / "hf-vllm-handoff"
+def _format_fail_reward() -> float:
+    return float(settings.format_fail_reward)
+
+
+def _pass_reward() -> float:
+    return float(settings.pass_reward)
+
+
+def _fail_reward() -> float:
+    return float(settings.fail_reward)
+
+
+# Module constants (PASS_REWARD, L_MAX, ...) are resolved via __getattr__ from settings.
+
+
+def __getattr__(name: str):
+    mapping = {
+        "FORMAT_FAIL_REWARD": "format_fail_reward",
+        "PASS_REWARD": "pass_reward",
+        "FAIL_REWARD": "fail_reward",
+        "L_MAX": "l_max",
+        "L_CACHE": "l_cache",
+        "DEFAULT_TOKENIZER_PATH": "tokenizer_path",
+    }
+    if name in mapping:
+        value = settings.get(mapping[name])
+        if name == "DEFAULT_TOKENIZER_PATH":
+            return settings.REPO_ROOT / str(value)
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class SandboxRunner(Protocol):
@@ -41,7 +65,8 @@ class PendingRollout:
 def _default_tokenizer():
     from transformers import AutoTokenizer
 
-    path = Path(os.environ.get("TINY_CODER_TOKENIZER", DEFAULT_TOKENIZER_PATH))
+    default_path = settings.REPO_ROOT / str(settings.tokenizer_path)
+    path = Path(os.environ.get("TINY_CODER_TOKENIZER", default_path))
     if not path.exists():
         raise RuntimeError(
             f"tokenizer not found at {path}; pass Completion.token_ids from vLLM or a tokenizer"
@@ -50,9 +75,7 @@ def _default_tokenizer():
 
 
 def response_token_count(completion: str, *, token_ids: list[int] | None = None, tokenizer: Any | None = None) -> int:
-    """
-    gets token length
-    """
+    """Token length of a completion string."""
     if token_ids is not None:
         return len(token_ids)
     tok = tokenizer if tokenizer is not None else _default_tokenizer()
@@ -60,9 +83,7 @@ def response_token_count(completion: str, *, token_ids: list[int] | None = None,
 
 
 def extract_code(completion: str) -> str | None:
-    """
-    uses fences to extract python code from response
-    """
+    """Extract python code from a model response via fences / Solution class."""
     text = completion.strip()
     if THINK_END in text:
         text = text.split(THINK_END, 1)[1].strip()
@@ -75,9 +96,7 @@ def extract_code(completion: str) -> str | None:
 
 
 def make_candidate(completion: str, sample: LeetCodeSample, *, rollout_id: str) -> Candidate | None:
-    """
-    creates candidate object
-    """
+    """Build a sandbox Candidate from completion text + dataset sample."""
     code = extract_code(completion)
     if not code:
         return None
@@ -87,18 +106,23 @@ def make_candidate(completion: str, sample: LeetCodeSample, *, rollout_id: str) 
 
 
 def reward_from_status(status: int) -> float:
-    """
-    gets test pass reward (pass tests means status 1)
-    """
+    """Map sandbox wait status to pass/fail reward."""
     if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
-        return PASS_REWARD
-    return FAIL_REWARD
+        return _pass_reward()
+    return _fail_reward()
 
 
-def overlong_penalty(response_tokens: int, *, l_max: int = L_MAX, l_cache: int = L_CACHE) -> float:
-    """
-    computes overlong penalty
-    """
+def overlong_penalty(
+    response_tokens: int,
+    *,
+    l_max: int | None = None,
+    l_cache: int | None = None,
+) -> float:
+    """DAPO-style soft overlong penalty."""
+    if l_max is None:
+        l_max = int(settings.l_max)
+    if l_cache is None:
+        l_cache = int(settings.l_cache)
     if l_cache <= 0:
         raise ValueError("l_cache must be positive")
     safe_length = l_max - l_cache
@@ -130,7 +154,7 @@ def compute_reward_batch(
 
         candidate = make_candidate(completion.text, sample, rollout_id=rollout_id)
         if candidate is None:
-            pending[rollout_id].reward = FORMAT_FAIL_REWARD
+            pending[rollout_id].reward = _format_fail_reward()
             continue
 
         runner.submit(candidate)
@@ -150,7 +174,7 @@ def compute_reward_batch(
     for i, completion in enumerate(completions):
         rollout_id = f"{sample.task_id}:{i}"
         entry = pending[rollout_id]
-        base_reward = entry.reward if entry.reward is not None else FAIL_REWARD
+        base_reward = entry.reward if entry.reward is not None else _fail_reward()
         penalty = overlong_penalty(completion.response_tokens)
         completion.base_reward = base_reward
         completion.overlong_penalty = penalty

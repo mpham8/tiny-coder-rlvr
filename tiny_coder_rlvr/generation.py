@@ -14,8 +14,7 @@ from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 from vllm.reasoning import ReasoningParserManager
 
 from tiny_coder_rlvr.completion import Completion
-
-MAX_NEW_TOKENS = 7168
+from tiny_coder_rlvr import settings
 
 
 def _rpc_safe_update_info(update_info: dict[str, Any]) -> dict[str, Any]:
@@ -55,16 +54,16 @@ class VllmGenerator:
     def __init__(
         self,
         model_name: str,
-        checkpoint_path: str,
+        model_path: str,
         dtype: str,
         max_model_len: int,
         gpu_memory_utilization: float,
         reasoning_parser_name: str = "qwen3",
-        weight_sync: str = "disk",
+        max_new_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
     ):
-        if weight_sync not in {"disk", "ipc"}:
-            raise ValueError(f"weight_sync must be 'disk' or 'ipc', got {weight_sync!r}")
-
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -73,47 +72,47 @@ class VllmGenerator:
         )
 
         self.model_name = model_name
-        self.checkpoint_path = checkpoint_path
+        # Initial HF weights used only to construct the engine once.
+        self.model_path = model_path
         self.dtype = dtype
         self.max_model_len = max_model_len
         self.gpu_memory_utilization = gpu_memory_utilization
         self.reasoning_parser_name = reasoning_parser_name
-        self.weight_sync = weight_sync
+        self.max_new_tokens = int(settings.max_new_tokens if max_new_tokens is None else max_new_tokens)
+        self.temperature = float(settings.temperature if temperature is None else temperature)
+        self.top_p = float(settings.top_p if top_p is None else top_p)
+        self.top_k = int(settings.top_k if top_k is None else top_k)
         self.llm: LLM | None = None
         self._transfer_engine = None
         self._sleeping = False
         self._awake_tags: set[str] = {"weights", "kv_cache"}
 
     def load(self):
-        """Create the vLLM engine (once for ipc; every handoff for disk)."""
-        if self.llm is not None and self.weight_sync == "ipc":
+        """Create the vLLM engine once (subsequent weight updates use IPC)."""
+        if self.llm is not None:
             return
 
-        kwargs = dict(
-            model=self.checkpoint_path,
+        # Required so EngineCore can unpickle CUDA IPC handles from the trainer.
+        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+        self.llm = LLM(
+            model=self.model_path,
             dtype=self.dtype,
             max_model_len=self.max_model_len,
             gpu_memory_utilization=self.gpu_memory_utilization,
             structured_outputs_config=StructuredOutputsConfig(
                 reasoning_parser=self.reasoning_parser_name
             ),
-        )
-        if self.weight_sync == "ipc":
-            # Required so EngineCore can unpickle CUDA IPC handles from the trainer.
-            os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
-            kwargs["weight_transfer_config"] = WeightTransferConfig(backend="ipc")
+            weight_transfer_config=WeightTransferConfig(backend="ipc"),
             # Level-2 sleep frees weights+KV while keeping the engine process alive.
-            kwargs["enable_sleep_mode"] = True
-
-        self.llm = LLM(**kwargs)
+            enable_sleep_mode=True,
+        )
         self._transfer_engine = None
         self._sleeping = False
         self._awake_tags = {"weights", "kv_cache"}
 
     def init_weight_sync(self, policy_module) -> None:
-        """Bind HF policy module as the IPC weight source (ipc mode only)."""
-        if self.weight_sync != "ipc":
-            return
+        """Bind HF policy module as the IPC weight source."""
         if self.llm is None:
             raise RuntimeError("VllmGenerator.load() must be called before init_weight_sync()")
 
@@ -151,25 +150,14 @@ class VllmGenerator:
         self.wake_up(tags=None)
 
     def sync_weights(self) -> None:
-        """Push current HF policy weights into the live vLLM engine (no disk).
+        """Push current HF policy weights into the live vLLM engine via CUDA IPC.
 
         Caller should wake_up(tags=['weights']) first after level-2 sleep so
         weight storage exists; KV can stay asleep until after HF moves off GPU.
         """
-        if self.weight_sync != "ipc":
-            raise RuntimeError("sync_weights() requires weight_sync='ipc'")
         if self._transfer_engine is None:
             raise RuntimeError("init_weight_sync() must be called before sync_weights()")
         self._transfer_engine.send_weights()
-
-    def reload_weights_from_path(self, path: str | None = None) -> None:
-        """Reload weights into a live engine from a HF checkpoint directory."""
-        if self.llm is None:
-            raise RuntimeError("VllmGenerator.load() must be called before reload_weights_from_path()")
-        self.llm.collective_rpc(
-            "reload_weights",
-            kwargs={"weights_path": str(path or self.checkpoint_path)},
-        )
 
     def build_prompt(self, sample: dict, *, enable_thinking: bool = True) -> str:
         messages = [{"role": "user", "content": sample["query"]}]
@@ -182,13 +170,13 @@ class VllmGenerator:
 
     def make_sampling_params(self, prompt: str, *, n: int = 16) -> SamplingParams:
         prompt_len = len(self.tokenizer.encode(prompt))
-        max_tokens = min(MAX_NEW_TOKENS, self.max_model_len - prompt_len - 64)
+        max_tokens = min(self.max_new_tokens, self.max_model_len - prompt_len - 64)
         if max_tokens < 1:
             raise ValueError(f"prompt too long for max_model_len={self.max_model_len}: {prompt_len} tokens")
         return SamplingParams(
-            temperature=0.6,
-            top_p=0.95,
-            top_k=20,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            top_k=self.top_k,
             max_tokens=max_tokens,
             n=n,
             logprobs=1,
