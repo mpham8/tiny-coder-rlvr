@@ -1,13 +1,54 @@
 from __future__ import annotations
 
+import base64
+import os
+import pickle
+from typing import Any
+
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
-from vllm.config import StructuredOutputsConfig
+from vllm.config import StructuredOutputsConfig, WeightTransferConfig
+from vllm.distributed.weight_transfer import ModuleSource
+from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
+from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 from vllm.reasoning import ReasoningParserManager
 
 from tiny_coder_rlvr.completion import Completion
 
 MAX_NEW_TOKENS = 7168
+
+
+def _rpc_safe_update_info(update_info: dict[str, Any]) -> dict[str, Any]:
+    """Pickle CUDA IPC handles so multiprocess LLM RPC can carry them.
+
+    Same encoding as vLLM's HTTPVLLMWeightSyncClient; the engine worker
+    unpickles when VLLM_ALLOW_INSECURE_SERIALIZATION=1.
+    """
+    ipc_handles = update_info.get("ipc_handles")
+    if ipc_handles is None:
+        return update_info
+    out = {k: v for k, v in update_info.items() if k != "ipc_handles"}
+    out["ipc_handles_pickled"] = base64.b64encode(pickle.dumps(ipc_handles)).decode("utf-8")
+    return out
+
+
+class _LLMWeightSyncClient:
+    """Adapt vLLM's LLM API to the trainer WeightSyncClient protocol."""
+
+    def __init__(self, llm: LLM) -> None:
+        self.llm = llm
+
+    def init_weight_transfer_engine(self, init_info: dict) -> None:
+        self.llm.init_weight_transfer_engine({"init_info": init_info})
+
+    def start_weight_update(self) -> None:
+        self.llm.start_weight_update()
+
+    def update_weights(self, update_info: dict) -> None:
+        self.llm.update_weights({"update_info": _rpc_safe_update_info(update_info)})
+
+    def finish_weight_update(self, weight_version: str | None = None) -> None:
+        self.llm.finish_weight_update(weight_version)
 
 
 class VllmGenerator:
@@ -19,7 +60,11 @@ class VllmGenerator:
         max_model_len: int,
         gpu_memory_utilization: float,
         reasoning_parser_name: str = "qwen3",
+        weight_sync: str = "disk",
     ):
+        if weight_sync not in {"disk", "ipc"}:
+            raise ValueError(f"weight_sync must be 'disk' or 'ipc', got {weight_sync!r}")
+
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -33,11 +78,18 @@ class VllmGenerator:
         self.max_model_len = max_model_len
         self.gpu_memory_utilization = gpu_memory_utilization
         self.reasoning_parser_name = reasoning_parser_name
+        self.weight_sync = weight_sync
         self.llm: LLM | None = None
+        self._transfer_engine = None
+        self._sleeping = False
+        self._awake_tags: set[str] = {"weights", "kv_cache"}
 
     def load(self):
-        """Create the vLLM engine and load the latest checkpoint."""
-        self.llm = LLM(
+        """Create the vLLM engine (once for ipc; every handoff for disk)."""
+        if self.llm is not None and self.weight_sync == "ipc":
+            return
+
+        kwargs = dict(
             model=self.checkpoint_path,
             dtype=self.dtype,
             max_model_len=self.max_model_len,
@@ -45,6 +97,78 @@ class VllmGenerator:
             structured_outputs_config=StructuredOutputsConfig(
                 reasoning_parser=self.reasoning_parser_name
             ),
+        )
+        if self.weight_sync == "ipc":
+            # Required so EngineCore can unpickle CUDA IPC handles from the trainer.
+            os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+            kwargs["weight_transfer_config"] = WeightTransferConfig(backend="ipc")
+            # Level-2 sleep frees weights+KV while keeping the engine process alive.
+            kwargs["enable_sleep_mode"] = True
+
+        self.llm = LLM(**kwargs)
+        self._transfer_engine = None
+        self._sleeping = False
+        self._awake_tags = {"weights", "kv_cache"}
+
+    def init_weight_sync(self, policy_module) -> None:
+        """Bind HF policy module as the IPC weight source (ipc mode only)."""
+        if self.weight_sync != "ipc":
+            return
+        if self.llm is None:
+            raise RuntimeError("VllmGenerator.load() must be called before init_weight_sync()")
+
+        self._transfer_engine = WeightTransferTrainerFactory.trainer_init(
+            IPCTrainerInitInfo(rank=0, packed=True),
+            client=_LLMWeightSyncClient(self.llm),
+            source=ModuleSource(policy_module),
+        )
+
+    def sleep(self, level: int = 2) -> None:
+        """Discard vLLM GPU allocations (level 2: weights + KV) without killing the engine."""
+        if self.llm is None:
+            raise RuntimeError("VllmGenerator.load() must be called before sleep()")
+        if self._sleeping and not self._awake_tags:
+            return
+        self.llm.sleep(level=level)
+        self._sleeping = True
+        self._awake_tags = set()
+
+    def wake_up(self, tags: list[str] | None = None) -> None:
+        """Restore slept GPU allocations. tags: weights / kv_cache / scheduling / None=all."""
+        if self.llm is None:
+            raise RuntimeError("VllmGenerator.load() must be called before wake_up()")
+        self.llm.wake_up(tags=tags)
+        if tags is None:
+            self._awake_tags = {"weights", "kv_cache"}
+        else:
+            self._awake_tags.update(tags)
+        self._sleeping = not {"weights", "kv_cache"}.issubset(self._awake_tags)
+
+    def ensure_awake(self) -> None:
+        """Fully wake the engine before generate/eval if it was put to sleep."""
+        if self.llm is None or not self._sleeping:
+            return
+        self.wake_up(tags=None)
+
+    def sync_weights(self) -> None:
+        """Push current HF policy weights into the live vLLM engine (no disk).
+
+        Caller should wake_up(tags=['weights']) first after level-2 sleep so
+        weight storage exists; KV can stay asleep until after HF moves off GPU.
+        """
+        if self.weight_sync != "ipc":
+            raise RuntimeError("sync_weights() requires weight_sync='ipc'")
+        if self._transfer_engine is None:
+            raise RuntimeError("init_weight_sync() must be called before sync_weights()")
+        self._transfer_engine.send_weights()
+
+    def reload_weights_from_path(self, path: str | None = None) -> None:
+        """Reload weights into a live engine from a HF checkpoint directory."""
+        if self.llm is None:
+            raise RuntimeError("VllmGenerator.load() must be called before reload_weights_from_path()")
+        self.llm.collective_rpc(
+            "reload_weights",
+            kwargs={"weights_path": str(path or self.checkpoint_path)},
         )
 
     def build_prompt(self, sample: dict, *, enable_thinking: bool = True) -> str:
@@ -87,6 +211,7 @@ class VllmGenerator:
     ) -> list[Completion]:
         if self.llm is None:
             raise RuntimeError("VllmGenerator.load() must be called before generate()")
+        self.ensure_awake()
 
         prompt = self.build_prompt(sample, enable_thinking=enable_thinking)
         sampling_params = self.make_sampling_params(prompt, n=n)
@@ -116,3 +241,6 @@ class VllmGenerator:
             return
         self.llm.llm_engine.engine_core.shutdown()
         self.llm = None
+        self._transfer_engine = None
+        self._sleeping = False
+        self._awake_tags = set()

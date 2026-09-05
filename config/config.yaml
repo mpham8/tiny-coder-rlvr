@@ -8,14 +8,20 @@ num_epochs: 1
 batch_size: 1
 group_size: 8
 lr: 1.0e-6
+seed: 42
 eval_every: 50
+save_every: 30
 num_runners: 2
 resume: true
 
 dtype: bfloat16
 max_model_len: 8192
-gpu_memory_utilization: 0.9
+# Higher util is fine with weight_sync=ipc: sleep(level=2) frees vLLM VRAM before HF train.
+gpu_memory_utilization: 0.85
 reasoning_parser_name: qwen3
+# disk: save HF → rebuild/load vLLM each step
+# ipc: keep vLLM process alive; sleep during train; IPC sync after wake(weights)
+weight_sync: ipc
 
 decontaminate: true
 

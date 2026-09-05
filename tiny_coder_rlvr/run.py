@@ -82,6 +82,7 @@ def main(argv: list[str] | None = None) -> None:
         max_model_len=int(cfg.get("max_model_len", 8192)),
         gpu_memory_utilization=float(cfg.get("gpu_memory_utilization", 0.85)),
         reasoning_parser_name=str(cfg.get("reasoning_parser_name", "qwen3")),
+        weight_sync=str(cfg.get("weight_sync", "disk")),
     )
     runner = create_sandbox_runner_pool(int(cfg.get("num_runners", 2)))
 
@@ -99,6 +100,7 @@ def main(argv: list[str] | None = None) -> None:
         resume=resume,
         eval_dataloader=eval_loader,
         eval_every=int(cfg.get("eval_every", 50)),
+        save_every=int(cfg.get("save_every", 30)),
     )
 
     try:
@@ -106,7 +108,7 @@ def main(argv: list[str] | None = None) -> None:
     finally:
         generator.shutdown()
         runner.stop()
-        policy.to_cpu()
+        policy.to_cpu(optimizer)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ class Trainer:
         resume: bool = True,
         eval_dataloader=None,
         eval_every: int = 50,
+        save_every: int = 30,
     ):
         self.policy = policy
         self.generator = generator
@@ -44,6 +45,7 @@ class Trainer:
         self.cfg = cfg or {}
         self.eval_dataloader = eval_dataloader
         self.eval_every = eval_every
+        self.save_every = save_every
 
         self.start_epoch = 0
         self.start_batch_idx = 0
@@ -192,13 +194,27 @@ class Trainer:
                 if epoch == self.start_epoch and batch_idx < self.start_batch_idx:
                     continue
 
-                #move policy to cpu, save policy, load vllm
-                self.policy.to_cpu()
-                self.policy.save(self.intermediate_path)
-                self.generator.checkpoint_path = str(self.intermediate_path)
-                self.generator.load()
+                # HF ↔ vLLM weight handoff
+                if self.generator.weight_sync == "ipc":
+                    # Persistent engine: seed once from disk, then sleep/wake + IPC.
+                    if self.generator.llm is None:
+                        self.policy.to_cpu(self.optimizer)
+                        self.generator.checkpoint_path = str(self.intermediate_path)
+                        self.policy.save(self.intermediate_path)
+                        self.generator.load()
+                        # IPC bind only needs a module reference; keep HF on CPU
+                        # while vLLM holds rollout VRAM.
+                        self.generator.init_weight_sync(self.policy.model)
+                    else:
+                        self.policy.to_cpu(self.optimizer)
+                        self.generator.ensure_awake()
+                else:
+                    self.policy.to_cpu(self.optimizer)
+                    self.policy.save(self.intermediate_path)
+                    self.generator.checkpoint_path = str(self.intermediate_path)
+                    self.generator.load()
 
-                # periodic test eval (reuse loaded vLLM)
+                # periodic test eval (reuse loaded / awake vLLM)
                 if (
                     self.eval_dataloader is not None
                     and self.eval_every > 0
@@ -239,9 +255,13 @@ class Trainer:
                 advantages = [a for group in advantage_groups for a in group]
                 completions = [c for group in grouped_completions for c in group]
 
-                #free vllm, move policy to gpu
-                self.generator.shutdown()
-                self.policy.to_gpu()
+                # free GPU for training
+                if self.generator.weight_sync == "disk":
+                    self.generator.shutdown()
+                else:
+                    # Discard vLLM weights+KV; keep engine process for fast wake + IPC.
+                    self.generator.sleep(level=2)
+                self.policy.to_gpu(self.optimizer)
 
                 #build training tensors
                 mask, log_probs, old_log_probs, advantages_t = self.build_training_tensors(
@@ -257,22 +277,33 @@ class Trainer:
                 self.optimizer.step()
                 global_step += 1
 
+                if self.generator.weight_sync == "ipc":
+                    # Wake weight storage only → IPC sync → free HF → restore KV.
+                    self.generator.wake_up(tags=["weights"])
+                    self.generator.sync_weights()
+                    self.policy.to_cpu(self.optimizer)
+                    self.generator.wake_up(tags=["kv_cache"])
+
                 next_batch_idx = batch_idx + 1
                 next_epoch = epoch
                 if next_batch_idx >= len(self.dataloader):
                     next_epoch = epoch + 1
                     next_batch_idx = 0
-                self.save_train_checkpoint(
-                    epoch=next_epoch,
-                    batch_idx=next_batch_idx,
-                    global_step=global_step,
-                )
+
+                if self.save_every > 0 and global_step % self.save_every == 0:
+                    self.save_train_checkpoint(
+                        epoch=next_epoch,
+                        batch_idx=next_batch_idx,
+                        global_step=global_step,
+                    )
 
                 #log
                 mean_reward = sum(c.reward for c in completions) / max(len(completions), 1)
+                mean_response_len = sum(c.response_tokens for c in completions) / max(len(completions), 1)
                 pbar.set_postfix(
                     loss=f"{loss.item():.4f}",
                     reward=f"{mean_reward:.3f}",
+                    resp_len=f"{mean_response_len:.0f}",
                     step=global_step,
                 )
                 if wandb_run is not None:
@@ -280,6 +311,7 @@ class Trainer:
                         {
                             "train/loss": loss.item(),
                             "train/reward": mean_reward,
+                            "train/mean_response_length": mean_response_len,
                             "epoch": epoch,
                             "batch_idx": batch_idx,
                             "global_step": global_step,
@@ -287,6 +319,13 @@ class Trainer:
                     )
 
             self.start_batch_idx = 0
+
+        # Always persist the final train state (covers short runs / save_every gaps).
+        self.save_train_checkpoint(
+            epoch=self.num_epochs,
+            batch_idx=0,
+            global_step=global_step,
+        )
 
         if wandb_run is not None:
             wandb_run.finish()

@@ -67,10 +67,10 @@ class FakePolicy:
             requires_grad=True,
         )
 
-    def to_cpu(self):
+    def to_cpu(self, optimizer=None):
         return None
 
-    def to_gpu(self):
+    def to_gpu(self, optimizer=None):
         return None
 
     def save(self, path):
