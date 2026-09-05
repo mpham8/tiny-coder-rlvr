@@ -181,7 +181,12 @@ class Trainer:
 
         global_step = self.global_step
 
+        seed = self.cfg.get("seed")
         for epoch in range(self.start_epoch, self.num_epochs):
+            # Reseed per epoch so resume mid-run sees the same shuffle order.
+            if seed is not None and getattr(self.dataloader, "generator", None) is not None:
+                self.dataloader.generator.manual_seed(int(seed) + epoch)
+
             pbar = tqdm(self.dataloader, desc=f"epoch {epoch + 1}/{self.num_epochs}", leave=True)
             for batch_idx, batch in enumerate(pbar):
                 if epoch == self.start_epoch and batch_idx < self.start_batch_idx:

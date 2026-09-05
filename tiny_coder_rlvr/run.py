@@ -65,6 +65,7 @@ def main(argv: list[str] | None = None) -> None:
     train_loader = get_dataloader(
         split="train",
         batch_size=int(cfg.get("batch_size", 1)),
+        seed=int(cfg["seed"]) if cfg.get("seed") is not None else None,
         decontaminate=bool(cfg.get("decontaminate", True)),
     )
     eval_loader = get_dataloader(

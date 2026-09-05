@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from functools import lru_cache
 from typing import Any
 
+import torch
 from datasets import Dataset, load_dataset
 from torch.utils.data import DataLoader, Dataset as TorchDataset
 
@@ -142,6 +143,7 @@ def get_dataloader(
     shuffle: bool | None = None,
     num_workers: int = 0,
     *,
+    seed: int | None = None,
     decontaminate: bool = True,
     ngram_size: int = DEFAULT_NGRAM_SIZE,
     **loader_kwargs: Any,
@@ -149,8 +151,21 @@ def get_dataloader(
     if shuffle is None:
         shuffle = split == "train"
 
+    generator = None
+    if seed is not None and shuffle:
+        generator = torch.Generator()
+        generator.manual_seed(int(seed))
+
     dataset = LeetCodeRLVRDataset(load_leetcode_dataset(split, decontaminate=decontaminate, ngram_size=ngram_size))
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, collate_fn=collate_leetcode_samples, **loader_kwargs)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=collate_leetcode_samples,
+        generator=generator,
+        **loader_kwargs,
+    )
 
 
 def sample_to_dict(sample: LeetCodeSample) -> dict[str, Any]:
