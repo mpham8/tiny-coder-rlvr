@@ -8,7 +8,7 @@ EPSILON_HIGH = 0.28
 
 def grpo_loss(mask: torch.Tensor, log_probs: torch.Tensor, old_log_probs: torch.Tensor, advantages: torch.Tensor, *, epsilon_low: float = EPSILON_LOW, epsilon_high: float = EPSILON_HIGH) -> torch.Tensor:
     """
-    DAPO Style GRPO Loss
+    DAPO Style GRPO Loss, make sure mask is 1 for only reponse tokens
     """
     a = advantages.unsqueeze(-1)
     r = (log_probs - old_log_probs).exp()

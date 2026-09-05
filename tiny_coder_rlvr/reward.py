@@ -50,7 +50,9 @@ def _default_tokenizer():
 
 
 def response_token_count(completion: str, *, token_ids: list[int] | None = None, tokenizer: Any | None = None) -> int:
-    """Token length of a completion string."""
+    """
+    gets token length
+    """
     if token_ids is not None:
         return len(token_ids)
     tok = tokenizer if tokenizer is not None else _default_tokenizer()
@@ -58,7 +60,9 @@ def response_token_count(completion: str, *, token_ids: list[int] | None = None,
 
 
 def extract_code(completion: str) -> str | None:
-    """Extract python code from a model response via fences / Solution class."""
+    """
+    uses fences to extract python code from response
+    """
     text = completion.strip()
     if THINK_END in text:
         text = text.split(THINK_END, 1)[1].strip()
@@ -71,7 +75,9 @@ def extract_code(completion: str) -> str | None:
 
 
 def make_candidate(completion: str, sample: LeetCodeSample, *, rollout_id: str) -> Candidate | None:
-    """Build a sandbox Candidate from completion text + dataset sample."""
+    """
+    creates candidate object
+    """
     code = extract_code(completion)
     if not code:
         return None
@@ -81,14 +87,18 @@ def make_candidate(completion: str, sample: LeetCodeSample, *, rollout_id: str) 
 
 
 def reward_from_status(status: int) -> float:
-    """Map sandbox wait status to pass/fail reward."""
+    """
+    gets test pass reward (pass tests means status 1)
+    """
     if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
         return PASS_REWARD
     return FAIL_REWARD
 
 
 def overlong_penalty(response_tokens: int, *, l_max: int = L_MAX, l_cache: int = L_CACHE) -> float:
-    """DAPO-style soft overlong penalty."""
+    """
+    computes overlong penalty
+    """
     if l_cache <= 0:
         raise ValueError("l_cache must be positive")
     safe_length = l_max - l_cache

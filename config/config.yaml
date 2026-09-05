@@ -1,0 +1,25 @@
+model: Qwen/Qwen3-1.7B-Base
+# Prefer local HF weights when present (also used after resume).
+init_checkpoint: checkpoints/hf-vllm-handoff
+checkpoint_path: checkpoints/train
+intermediate_path: checkpoints/hf-vllm-handoff-live
+
+num_epochs: 1
+batch_size: 1
+group_size: 8
+lr: 1.0e-6
+eval_every: 50
+num_runners: 2
+resume: true
+
+dtype: bfloat16
+max_model_len: 8192
+gpu_memory_utilization: 0.9
+reasoning_parser_name: qwen3
+
+decontaminate: true
+
+WANDB_ENABLED: true
+WANDB_PROJECT: tiny-coder-rlvr
+WANDB_ENTITY: null
+WANDB_RUN_NAME: null
